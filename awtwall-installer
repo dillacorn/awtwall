@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# awtwall-installer - installer and manager for awtwall
+#
+# Defaults to user install in: $HOME/.local/bin/awtwall
+# Override with: PREFIX=/some/prefix ./awtwall-installer
+#   -> installs to: $PREFIX/bin/awtwall
+#
+# If awtwall is already installed, this script can also uninstall it.
+
+set -euo pipefail
+
+PREFIX=${PREFIX:-"$HOME/.local"}
+BINDIR="$PREFIX/bin"
+TARGET="$BINDIR/awtwall"
+UPDATER_TARGET="$BINDIR/awtwall-update"
+
+# Resolve script dir
+SCRIPT_DIR=$(
+  cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1
+  pwd
+)
+
+SOURCE=""
+if [[ -f "$SCRIPT_DIR/awtwall" ]]; then
+  SOURCE="$SCRIPT_DIR/awtwall"
+elif [[ -f "$SCRIPT_DIR/awtwall.sh" ]]; then
+  SOURCE="$SCRIPT_DIR/awtwall.sh"
+else
+  echo "Error: awtwall or awtwall.sh not found next to awtwall-installer"
+  exit 1
+fi
+
+mkdir -p "$BINDIR"
+
+if [[ -e "$TARGET" ]]; then
+  echo "Existing awtwall detected at: $TARGET"
+  echo
+  echo "Choose action:"
+  echo "  [1] Overwrite with current version"
+  echo "  [2] Uninstall awtwall from $BINDIR"
+  echo "  [3] Abort"
+  read -rp "Selection [1/2/3]: " ans
+  case "$ans" in
+    1)
+      cp "$SOURCE" "$TARGET"
+      chmod +x "$TARGET"
+      echo "Updated awtwall at $TARGET"
+      ;;
+    2)
+      rm -f "$TARGET"
+      echo "Removed awtwall from $TARGET"
+      # Also remove awtwall-update if it exists
+      if [[ -f "$UPDATER_TARGET" ]]; then
+        rm -f "$UPDATER_TARGET"
+        echo "Removed awtwall-update from $UPDATER_TARGET"
+      fi
+      # optional config removal
+      if [[ -d "$HOME/.config/awtwall" ]]; then
+        read -rp "Remove config directory $HOME/.config/awtwall? [y/N]: " c
+        case "$c" in
+          [yY]) rm -rf "$HOME/.config/awtwall"; echo "Config removed.";;
+          *)    echo "Config kept.";;
+        esac
+      fi
+      exit 0
+      ;;
+    3|*)
+      echo "Aborted."
+      exit 1
+      ;;
+  esac
+else
+  cp "$SOURCE" "$TARGET"
+  chmod +x "$TARGET"
+  echo "Installed awtwall to $TARGET"
+fi
+
+# Install awtwall-update if available
+if [[ -f "$SCRIPT_DIR/awtwall-update" ]]; then
+  cp "$SCRIPT_DIR/awtwall-update" "$UPDATER_TARGET"
+  chmod +x "$UPDATER_TARGET"
+  echo "Installed awtwall-update to $UPDATER_TARGET"
+fi
+
+# PATH hint
+case ":$PATH:" in
+  *":$BINDIR:"*) ;;
+  *)
+    echo
+    echo "Warning: $BINDIR is not in your PATH."
+    echo "Add this to your shell config (example for bash):"
+    echo "  export PATH=\"$BINDIR:\$PATH\""
+    ;;
+esac
+
+echo
+echo "You can now run: awtwall"
+if [[ -f "$UPDATER_TARGET" ]]; then
+  echo "To update awtwall in the future, run: awtwall-update"
+fi
