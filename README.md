@@ -2,19 +2,24 @@
 
 awtwall is a fast TUI wallpaper picker for Wayland with image previews, saved settings, and a keyboard-first workflow.
 
-It is built for Hyprland-style setups and applies wallpapers through `swww` or `hyprpaper`.
+It is built for Hyprland-style setups and applies wallpapers through `swww`, `hyprpaper`, or `mpvpaper`.
 
 ## Features
 
 - Fast TUI wallpaper browser
+- Keyboard-first workflow with mouse support
 - Preview support with:
   - SIXEL via `img2sixel`
   - SIXEL via `chafa`
   - SIXEL via ImageMagick built with SIXEL support
   - kitty image previews in kitty terminals
-- Applies wallpapers with `swww` or `hyprpaper`
+- Wallpaper backends:
+  - `swww` for still images
+  - `hyprpaper` for still images
+  - `mpvpaper` for `.mp4` video wallpapers
 - Saved settings and last selection
 - Recursive or non-recursive wallpaper scanning
+- Media type filtering for images, GIFs, and MP4s
 - Built-in version check
 
 ## Requirements
@@ -24,18 +29,23 @@ Required:
 - `hyprland` for `hyprctl`
 - `imagemagick` for `magick`
 - `ncurses` for `tput`
-- one preview encoder unless previews are disabled:
-  - `chafa`
-  - `libsixel` for `img2sixel`
-  - or ImageMagick built with SIXEL support
+
+Preview support requires one of the following unless previews are disabled:
+
+- `chafa`
+- `libsixel` for `img2sixel`
+- ImageMagick built with SIXEL support
+- `kitty` for kitty image previews when running inside kitty
 
 Wallpaper backend:
 
 - `swww`
 - or `hyprpaper`
+- or `mpvpaper` for `.mp4` wallpapers
 
 Optional:
 
+- `ffmpeg` for better `.mp4` thumbnail extraction
 - `jq` for better monitor detection
 - `xdg-utils` for opening the wallpaper directory
 - `kitty` for kitty image previews
@@ -74,12 +84,13 @@ awtwall [options]
 ## Launch options
 
 ```text
--d, --dir PATH          Wallpaper directory
+-d, --dir PATH          Wallpaper directory (default: ~/Pictures/wallpapers)
 -n, --non-recursive     Disable recursive scanning
 -r, --recursive         Enable recursive scanning
--b, --backend NAME      swww | hyprpaper
+-b, --backend NAME      swww | hyprpaper | mpvpaper
 -o, --output NAME       Target display name or "All displays"
---no-sixel              Disable image previews
+--type NAME             all | images | gif | mp4
+--no-sixel              Disable image previews (UI only)
 --alt-screen            Use alternate screen buffer
 --force-encoder NAME    chafa | img2sixel | magick | kitty
 -h, --help              Show help
@@ -106,6 +117,18 @@ Use `hyprpaper` instead of `swww`:
 
 ```bash
 awtwall --backend hyprpaper
+```
+
+Use `mpvpaper` for video wallpapers:
+
+```bash
+awtwall --backend mpvpaper --type mp4
+```
+
+Show only still images:
+
+```bash
+awtwall --type images
 ```
 
 Start at the last saved selection:
@@ -148,28 +171,52 @@ awtwall supports multiple preview paths:
 - `magick` with SIXEL support
 - preview-disabled mode with `--no-sixel`
 
+## Backends
+
+### `swww`
+
+Best for still-image wallpapers with transition controls.
+
+### `hyprpaper`
+
+Best for still-image wallpapers when you prefer Hyprland's wallpaper daemon behavior.
+
+### `mpvpaper`
+
+Used for `.mp4` video wallpapers.
+
+`mpvpaper` is only for `.mp4` files. If you select a still image while `mpvpaper` is set, awtwall falls back to `hyprpaper`.
+
 ## In-app controls
 
 ### Navigation
 
 - `Arrow keys` move selection
 - `h`, `j`, `k`, `l` move selection
+- `PgUp` jumps up 6 items
+- `PgDn` jumps down 6 items
+- `Home` jumps to the first item
+- `End` jumps to the last item
 - `Mouse wheel` scrolls through wallpapers
 
 ### Actions
 
 - `Mouse left click` applies the selected wallpaper
 - `SPACE` applies the selected wallpaper
+- `Enter` also applies on terminals that send it cleanly
 - `r` applies a random wallpaper
 - `f` opens find
 - `c` clears find
 - `R` refreshes the wallpaper list
-- `q` quits
 - `D` changes wallpaper directory
+- `o` opens the current wallpaper directory
+- `x` clears the preview cache
+- `q` quits
 
 ### Settings
 
 - `n` toggles recursive scan
+- `e` cycles media type filter
 - `b` cycles backend
 - `m` cycles display target
 - `z` cycles `swww` resize mode
@@ -177,12 +224,14 @@ awtwall supports multiple preview paths:
 - `d` cycles `swww` transition duration
 - `p` cycles `swww` transition FPS
 - `i` cycles `swww` interpolation filter
+- `P` cycles `hyprpaper` mode
 
 ## Defaults
 
 - Default wallpaper directory: `~/Pictures/wallpapers`
 - Recursive scanning: enabled
 - Default backend: `swww`
+- Default display target: `All displays`
 
 ## State and cache
 
@@ -195,9 +244,11 @@ awtwall stores data in:
 
 This includes:
 
-- saved state
+- saved UI state
 - backend state
-- cached preview assets
+- thumbnail cache
+- preview cache
+- debug and preview error logs
 
 ## Version check
 
