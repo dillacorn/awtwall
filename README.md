@@ -4,7 +4,9 @@ awtwall is a fast TUI wallpaper picker for Wayland with image previews, saved se
 
 It is built for Hyprland-style setups and applies wallpapers through `swww`, `hyprpaper`, or `mpvpaper`.
 
-[![Watch awtwall demo](./awtwall_poster.png)](./awtwall_video.webm)
+<a href="./awtwall_video.webm">
+  <img src="./awtwall_poster.png" alt="Watch awtwall demo" width="700">
+</a>
 
 ## Features
 
