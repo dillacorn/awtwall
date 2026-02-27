@@ -29,17 +29,15 @@ AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
 awtwall_is_semver_like() {
-  # Accept: 10, 10.0, 10.0.1, v10.0.1
   local v="${1#v}"
   [[ "$v" =~ ^[0-9]+([.][0-9]+){0,3}$ ]]
 }
 
 awtwall_is_arch_based() {
-  # Prefer /etc/os-release (ID/ID_LIKE). Fallback: pacman in PATH.
   local id="" like=""
   if [[ -r /etc/os-release ]]; then
-    id="$(sed -n "s/^ID=//p" /etc/os-release | head -n1 | tr -d '\"')"
-    like="$(sed -n "s/^ID_LIKE=//p" /etc/os-release | head -n1 | tr -d '\"')"
+    id="$(sed -n 's/^ID=//p' /etc/os-release | head -n1 | tr -d '"')"
+    like="$(sed -n 's/^ID_LIKE=//p' /etc/os-release | head -n1 | tr -d '"')"
     [[ "$id" == arch* || "$like" == *arch* ]] && return 0
   fi
   command -v pacman >/dev/null 2>&1
@@ -90,12 +88,13 @@ awtwall_print_version() {
 
   echo "awtwall ${local_tag}"
 
-  local latest=""
+  local latest
   latest="$(awtwall_get_latest_tag 2>/dev/null || true)"
-  if [[ -z "$latest" ]]; then
+  if [[ -z "${latest:-}" ]]; then
     echo "Latest tag: (unavailable: no net/curl/wget)"
     echo "Update (AUR): paru -S awtwall   (or yay -S awtwall)"
     echo "Update (GitHub): awtwall-update"
+    echo "Releases: https://github.com/${AWTWALL_REPO}/releases"
     echo "Suggested: ${update_cmd}"
     return 0
   fi
@@ -103,12 +102,13 @@ awtwall_print_version() {
   echo "Latest tag: ${latest}"
 
   if awtwall_is_semver_like "$local_tag" && awtwall_is_semver_like "$latest"; then
-    local lv="${local_tag#v}"
-    local rv="${latest#v}"
+    local lv rv top
+    lv="${local_tag#v}"
+    rv="${latest#v}"
+
     if [[ "$lv" == "$rv" ]]; then
       echo "Status: up to date"
     else
-      local top
       top="$(printf '%s\n%s\n' "$lv" "$rv" | sort -V | tail -n1)"
       if [[ "$top" == "$rv" ]]; then
         echo "Status: update available"
@@ -124,6 +124,17 @@ awtwall_print_version() {
 
   echo "Update (AUR): paru -S awtwall   (or yay -S awtwall)"
   echo "Update (GitHub): awtwall-update"
+  echo "Releases: https://github.com/${AWTWALL_REPO}/releases"
+}
+
+awtwall_show_version_screen() {
+  if declare -F ui_leave >/dev/null 2>&1; then ui_leave; else echo; fi
+  echo
+  awtwall_print_version
+  echo
+  read -r -p 'Press Enter to return...' _awtwall_ver_pause || true
+  if declare -F ui_enter >/dev/null 2>&1; then ui_enter; fi
+  NEED_FULL_REDRAW=1
 }
 
 # Early exit for version query (avoid TUI init)
@@ -137,7 +148,6 @@ for __awtwall_arg in "$@"; do
 done
 unset __awtwall_arg
 # AWTWALL_VERSION_BLOCK_END
-
 DEFAULT_WALL_DIR="${HOME}/Pictures/wallpapers"
 WALL_DIR="${DEFAULT_WALL_DIR}"
 RECURSIVE=1
@@ -578,7 +588,7 @@ resume_focus_last() {
 
 
 die() {
-  printf 'wallpicker.sh: %s\n' "$*" >&2
+  printf 'awtwall: %s\n' "$*" >&2
   exit 1
 }
 
@@ -775,7 +785,7 @@ detect_sixel_encoder() {
 
 print_requirements_help() {
   cat >&2 <<'REQEOF'
-wallpicker.sh requirements (Arch Linux)
+awtwall requirements (Arch Linux)
 
 Required:
   hyprland (hyprctl)
@@ -841,7 +851,7 @@ check_runtime_requirements() {
   fi
 
   if (( missing )); then
-    echo "wallpicker.sh cannot start. Missing requirements:" >&2
+    echo "awtwall cannot start. Missing requirements:" >&2
     for item in "${missing_cmds[@]}"; do echo "  - $item" >&2; done
     echo >&2
     print_requirements_help
@@ -1680,7 +1690,7 @@ draw_help() {
   ui_color_reset
 
   ui_goto "$row2" 1; ui_clear_line; ui_dim
-  printf '%-*.*s' "$cols" "$cols"     " q quit | D dir | n recurse | b backend | m display | z resize | t trans | d dur | p fps | i interp "
+  printf '%-*.*s' "$cols" "$cols"     " q quit | v version | D dir | n recurse | b backend | m display | z resize | t trans | d dur | p fps | i interp "
   ui_color_reset
 }
 
@@ -2413,6 +2423,9 @@ main() {
       q|Q)
         CLEAR_ON_EXIT=1
         RUNNING=0
+        ;;
+      v|V)
+        awtwall_show_version_screen
         ;;
       ' ')
         apply_selected || true
