@@ -18,13 +18,13 @@ IFS=$'\n\t'
 
 # Arch deps (repo): 
 #    sudo pacman -S --needed imagemagick libsixel swww jq xdg-utils   # libsixel provides img2sixel
-# Optional backend (repo): sudo pacman -S --needed hyprpaper
+# Optional backends (repo): sudo pacman -S --needed hyprpaper mpvpaper
 
 APP_NAME="awtwall"
 APP_ID="awtwall"
 
 # AWTWALL_VERSION_BLOCK_BEGIN
-AWTWALL_VERSION="${AWTWALL_VERSION:-v1.0}"  # bump for releases
+AWTWALL_VERSION="${AWTWALL_VERSION:-v1.1}"  # bump for releases
 AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
@@ -152,7 +152,7 @@ DEFAULT_WALL_DIR="${HOME}/Pictures/wallpapers"
 WALL_DIR="${DEFAULT_WALL_DIR}"
 RECURSIVE=1
 
-BACKEND="swww"                  # swww | hyprpaper
+BACKEND="swww"                  # swww | hyprpaper | mpvpaper
 DISPLAY_TARGET="All displays"   # All displays | output name
 
 # swww settings (key-adjustable, auto-saved)
@@ -228,6 +228,7 @@ declare -a SWWW_DURATION_OPTIONS=(0.0 0.2 0.4 0.8 1.2 2.0 3.0 4.0)
 declare -a SWWW_FPS_OPTIONS=(15 24 30 45 60 90)
 
 FILTER_QUERY=""                 # runtime only (not persisted)
+FILTER_KIND="ALL"               # ALL | IMAGES | GIF | MP4
 STATUS_MSG="Starting..."
 SEL=0
 RUNNING=1
@@ -333,6 +334,106 @@ kill_hyprpaper_if_running() {
   fi
   return 0
 }
+
+is_mpvpaper_running() {
+  if have pgrep; then
+    pgrep -x mpvpaper >/dev/null 2>&1
+  elif have pidof; then
+    pidof mpvpaper >/dev/null 2>&1
+  else
+    ps -C mpvpaper >/dev/null 2>&1
+  fi
+}
+
+kill_mpvpaper_if_running() {
+  is_mpvpaper_running || return 0
+  if have pkill; then
+    pkill -x mpvpaper >/dev/null 2>&1 || true
+  elif have killall; then
+    killall mpvpaper >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
+
+# ---------- mpvpaper target helpers ----------
+mpvpaper_pids_for_target() {
+  local target="$1"
+  ps -eo pid=,args= 2>/dev/null | awk -v target="$target" '
+    /[m]pvpaper/ {
+      pid=$1
+      line=$0
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", line)
+      line = " " line " "
+      if (target == "ALL") {
+        print pid
+        next
+      }
+      if (index(line, " ALL ") || index(line, " " target " ")) {
+        print pid
+      }
+    }
+  '
+}
+
+kill_mpvpaper_for_target() {
+  local target="$1" pid
+  [[ -n "$target" ]] || return 0
+
+  if [[ "$target" == "ALL" ]]; then
+    kill_mpvpaper_if_running || true
+    return 0
+  fi
+
+  while IFS= read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    kill -TERM "$pid" 2>/dev/null || true
+  done < <(mpvpaper_pids_for_target "$target" || true)
+
+  sleep 0.20
+
+  while IFS= read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    kill -KILL "$pid" 2>/dev/null || true
+  done < <(mpvpaper_pids_for_target "$target" || true)
+
+  return 0
+}
+
+mpvpaper_running_for_target() {
+  local target="$1" img="$2"
+  ps -eo args= 2>/dev/null | awk -v target="$target" -v img="$img" '
+    /[m]pvpaper/ {
+      line = " " $0 " "
+      ok_target = 0
+      if (target == "ALL") {
+        ok_target = index(line, " ALL ") > 0
+      } else {
+        ok_target = index(line, " " target " ") > 0
+      }
+      if (ok_target && index(line, img) > 0) {
+        found = 1
+        exit 0
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
+start_mpvpaper_detached() {
+  local target="$1" img="$2"
+  have mpvpaper || return 1
+
+  if have nohup; then
+    nohup mpvpaper -o "no-audio --loop-file=inf" "$target" "$img" </dev/null >/dev/null 2>&1 &
+  else
+    mpvpaper -o "no-audio --loop-file=inf" "$target" "$img" </dev/null >/dev/null 2>&1 &
+  fi
+
+  sleep 0.25
+  mpvpaper_running_for_target "$target" "$img"
+}
+# ---------- end mpvpaper target helpers ----------
 
 takeover_hyprpaper_to_swww() {
   # Kill hyprpaper and reapply the last-known per-output wallpapers via swww.
@@ -799,8 +900,10 @@ Required:
 Backends:
   swww      (backend=swww)
   hyprpaper (backend=hyprpaper)
+  mpvpaper  (backend=mpvpaper, for .mp4 wallpapers)
 
 Optional:
+  ffmpeg    (better .mp4 thumbnail extraction)
   jq        (better monitor detection)
   xdg-utils (open wallpaper folder)
 REQEOF
@@ -829,6 +932,9 @@ check_runtime_requirements() {
       ;;
     hyprpaper)
       if ! have hyprpaper; then missing_cmds+=("hyprpaper (package: hyprpaper)"); missing=1; fi
+      ;;
+    mpvpaper)
+      if ! have mpvpaper; then missing_cmds+=("mpvpaper (package: mpvpaper)"); missing=1; fi
       ;;
     *)
       missing_cmds+=("invalid backend '$BACKEND'")
@@ -863,6 +969,49 @@ check_runtime_requirements() {
   return 0
 }
 
+generate_video_thumb_png() {
+  local src="$1" dst="$2" frame tmp
+  frame="${dst}.frame.$$".png
+  tmp="${dst}.tmp.$$"
+
+  rm -f -- "$frame" "$tmp"
+  mkdir -p -- "$(dirname -- "$dst")"
+
+  if have ffmpeg; then
+    if ffmpeg -hide_banner -loglevel error -y -ss 0 -i "$src" -frames:v 1 -- "$frame" >/dev/null 2>&1 && [[ -s "$frame" ]]; then
+      if magick "$frame" \
+          -auto-orient \
+          -thumbnail "${THUMB_PX_W}x${THUMB_PX_H}" \
+          -background black \
+          -alpha background \
+          -gravity center \
+          -extent "${THUMB_PX_W}x${THUMB_PX_H}" \
+          "PNG:${tmp}" >/dev/null 2>&1; then
+        rm -f -- "$frame"
+        mv -f -- "$tmp" "$dst"
+        return 0
+      fi
+    fi
+    rm -f -- "$frame" "$tmp"
+  fi
+
+  if magick "${src}[0]" \
+      -auto-orient \
+      -thumbnail "${THUMB_PX_W}x${THUMB_PX_H}" \
+      -background black \
+      -alpha background \
+      -gravity center \
+      -extent "${THUMB_PX_W}x${THUMB_PX_H}" \
+      "PNG:${tmp}" >/dev/null 2>&1; then
+    mv -f -- "$tmp" "$dst"
+    return 0
+  fi
+
+  rm -f -- "$frame" "$tmp"
+  LAST_ENCODER_ERR="video thumb failed: $(basename -- "$src")"
+  return 1
+}
+
 generate_thumb_png() {
   local src="$1" dst="$2" tmp ext src_decode
   tmp="${dst}.tmp.$$"
@@ -871,6 +1020,13 @@ generate_thumb_png() {
 
   ext="${src##*.}"
   ext="${ext,,}"
+
+  case "$ext" in
+    mp4)
+      generate_video_thumb_png "$src" "$dst"
+      return $?
+      ;;
+  esac
 
   # Animated formats can be slow or fail when ImageMagick tries to process all frames.
   # Force frame 0 for preview thumbnails.
@@ -883,7 +1039,14 @@ generate_thumb_png() {
       ;;
   esac
 
-  if magick "$src_decode"       -auto-orient       -thumbnail "${THUMB_PX_W}x${THUMB_PX_H}"       -background black       -alpha background       -gravity center       -extent "${THUMB_PX_W}x${THUMB_PX_H}"       "PNG:${tmp}" >/dev/null 2>&1; then
+  if magick "$src_decode" \
+      -auto-orient \
+      -thumbnail "${THUMB_PX_W}x${THUMB_PX_H}" \
+      -background black \
+      -alpha background \
+      -gravity center \
+      -extent "${THUMB_PX_W}x${THUMB_PX_H}" \
+      "PNG:${tmp}" >/dev/null 2>&1; then
     mv -f -- "$tmp" "$dst"
     return 0
   fi
@@ -892,13 +1055,27 @@ generate_thumb_png() {
 
   # Final fallback path: try original source (and then explicit [0] if not already used).
   if [[ "$src_decode" != "$src" ]]; then
-    if magick "$src"         -auto-orient         -thumbnail "${THUMB_PX_W}x${THUMB_PX_H}"         -background black         -alpha background         -gravity center         -extent "${THUMB_PX_W}x${THUMB_PX_H}"         "PNG:${tmp}" >/dev/null 2>&1; then
+    if magick "$src" \
+        -auto-orient \
+        -thumbnail "${THUMB_PX_W}x${THUMB_PX_H}" \
+        -background black \
+        -alpha background \
+        -gravity center \
+        -extent "${THUMB_PX_W}x${THUMB_PX_H}" \
+        "PNG:${tmp}" >/dev/null 2>&1; then
       mv -f -- "$tmp" "$dst"
       return 0
     fi
     rm -f -- "$tmp"
   else
-    if magick "${src}[0]"         -auto-orient         -thumbnail "${THUMB_PX_W}x${THUMB_PX_H}"         -background black         -alpha background         -gravity center         -extent "${THUMB_PX_W}x${THUMB_PX_H}"         "PNG:${tmp}" >/dev/null 2>&1; then
+    if magick "${src}[0]" \
+        -auto-orient \
+        -thumbnail "${THUMB_PX_W}x${THUMB_PX_H}" \
+        -background black \
+        -alpha background \
+        -gravity center \
+        -extent "${THUMB_PX_W}x${THUMB_PX_H}" \
+        "PNG:${tmp}" >/dev/null 2>&1; then
       mv -f -- "$tmp" "$dst"
       return 0
     fi
@@ -1123,25 +1300,33 @@ ensure_hyprpaper_running() {
   return 1
 }
 
+release_mpvpaper_for_targets() {
+  local out
+  if [[ "$DISPLAY_TARGET" == "All displays" ]]; then
+    kill_mpvpaper_for_target "ALL"
+    return 0
+  fi
+  for out in "${TARGET_OUTPUTS[@]}"; do
+    kill_mpvpaper_for_target "$out"
+  done
+  return 0
+}
+
 apply_with_swww() {
   local img="$1" outputs_csv
 
-  # If hyprpaper is running, it will sit on top of swww. Kill it before applying.
-  kill_hyprpaper_if_running
-
+  # hyprpaper can sit on top of swww, and mpvpaper can sit on top of both.
+  # Release competing backends for the target outputs before applying.
   resolve_target_outputs
   if (( ${#TARGET_OUTPUTS[@]} == 0 )); then msg "No outputs detected"; return 1; fi
+
+  kill_hyprpaper_if_running
+  release_mpvpaper_for_targets
+
   ensure_swww_daemon || return 1
 
   outputs_csv="$(IFS=,; printf '%s' "${TARGET_OUTPUTS[*]}")"
-  if run_quiet_hup_safe swww img \
-      --outputs "$outputs_csv" \
-      --resize "$SWWW_RESIZE" \
-      --transition-type "$SWWW_TRANSITION_TYPE" \
-      --transition-duration "$SWWW_TRANSITION_DURATION" \
-      --transition-fps "$SWWW_TRANSITION_FPS" \
-      --filter "$SWWW_FILTER" \
-      -- "$img"; then
+  if run_quiet_hup_safe swww img       --outputs "$outputs_csv"       --resize "$SWWW_RESIZE"       --transition-type "$SWWW_TRANSITION_TYPE"       --transition-duration "$SWWW_TRANSITION_DURATION"       --transition-fps "$SWWW_TRANSITION_FPS"       --filter "$SWWW_FILTER"       -- "$img"; then
     backend_state_set_outputs "swww" "$img" "${TARGET_OUTPUTS[@]}" || true
     msg "Applied via swww -> $(basename -- "$img")"
     return 0
@@ -1154,13 +1339,15 @@ apply_with_hyprpaper() {
   local img="$1" out arg ext t
 
   ext="${img##*.}"; ext="${ext,,}"
-  if [[ "$ext" == "gif" ]]; then
-    msg "hyprpaper: GIF not supported"
+  if [[ "$ext" == "gif" || "$ext" == "mp4" ]]; then
+    msg "hyprpaper: select a still image"
     return 1
   fi
 
   resolve_target_outputs
   if (( ${#TARGET_OUTPUTS[@]} == 0 )); then msg "No outputs detected"; return 1; fi
+
+  release_mpvpaper_for_targets
   ensure_hyprpaper_running || return 1
 
   t="${HYPERPAPER_TIMEOUT:-3}"
@@ -1182,7 +1369,6 @@ apply_with_hyprpaper() {
       if (( HYPERPAPER_JUST_STARTED == 1 && try < max_tries - 1 )); then
         ctl_t="$t_fast"
       fi
-      # hyprpaper expects: "mon, path, fit_mode" (note spaces after commas)
       arg="${out}, ${img}, ${HYPERPAPER_MODE}"
       if hyprpaper_ctl "$ctl_t" wallpaper "$arg"; then
         ok=1
@@ -1210,19 +1396,99 @@ apply_with_hyprpaper() {
   return 0
 }
 
+apply_with_mpvpaper() {
+  local img="$1" ext target out ok=1 started=0
+
+  ext="${img##*.}"
+  ext="${ext,,}"
+  if [[ "$ext" != "mp4" ]]; then
+    msg "mpvpaper: select an .mp4 file"
+    return 1
+  fi
+
+  resolve_target_outputs
+  if (( ${#TARGET_OUTPUTS[@]} == 0 )); then msg "No outputs detected"; return 1; fi
+
+  if [[ "$DISPLAY_TARGET" == "All displays" ]]; then
+    for out in "${TARGET_OUTPUTS[@]}"; do
+      kill_mpvpaper_for_target "$out"
+      if start_mpvpaper_detached "$out" "$img"; then
+        started=1
+        continue
+      fi
+      ok=0
+      break
+    done
+  else
+    target="${TARGET_OUTPUTS[0]}"
+    kill_mpvpaper_for_target "$target"
+    if start_mpvpaper_detached "$target" "$img"; then
+      ok=1
+      started=1
+    else
+      ok=0
+    fi
+  fi
+
+  if (( ok == 1 && started == 1 )); then
+    backend_state_set_outputs "mpvpaper" "$img" "${TARGET_OUTPUTS[@]}" || true
+    msg "Applied via mpvpaper -> $(basename -- "$img")"
+    return 0
+  fi
+
+  msg "mpvpaper apply failed"
+  return 1
+}
+
+apply_still_image() {
+  local img="$1"
+
+  case "$BACKEND" in
+    swww)
+      if apply_with_swww "$img"; then
+        return 0
+      fi
+      msg "swww failed, falling back to hyprpaper"
+      BACKEND="hyprpaper"
+      apply_with_hyprpaper "$img"
+      return $?
+      ;;
+    hyprpaper)
+      apply_with_hyprpaper "$img"
+      return $?
+      ;;
+    mpvpaper|"")
+      msg "Still image selected, using hyprpaper"
+      BACKEND="hyprpaper"
+      apply_with_hyprpaper "$img"
+      return $?
+      ;;
+    *)
+      msg "Invalid backend '$BACKEND', using hyprpaper"
+      BACKEND="hyprpaper"
+      apply_with_hyprpaper "$img"
+      return $?
+      ;;
+  esac
+}
+
 apply_selected() {
-  local img rc
+  local img rc ext
   if (( ${#FILES[@]} == 0 )); then msg "No wallpapers to apply"; return 1; fi
 
   update_focus_state || true
   img="${FILES[$SEL]}"
+  ext="${img##*.}"
+  ext="${ext,,}"
 
   rc=1
-  case "$BACKEND" in
-    swww) apply_with_swww "$img"; rc=$? ;;
-    hyprpaper) apply_with_hyprpaper "$img"; rc=$? ;;
-    *) msg "Invalid backend: $BACKEND"; return 1 ;;
-  esac
+  if [[ "$ext" == "mp4" ]]; then
+    apply_with_mpvpaper "$img"
+    rc=$?
+  else
+    apply_still_image "$img"
+    rc=$?
+  fi
 
   if (( rc == 0 )); then
     LAST_APPLIED="$img"
@@ -1276,6 +1542,7 @@ save_state() {
     printf 'SWWW_TRANSITION_FPS=%q\n' "$SWWW_TRANSITION_FPS"
     printf 'SWWW_FILTER=%q\n' "$SWWW_FILTER"
     printf 'HYPERPAPER_MODE=%q\n' "$HYPERPAPER_MODE"
+    printf 'FILTER_KIND=%q\n' "$FILTER_KIND"
     printf 'LAST_SEL=%q\n' "${LAST_SEL:-0}"
     printf 'LAST_FOCUS=%q\n' "${LAST_FOCUS:-}"
     printf 'LAST_APPLIED=%q\n' "${LAST_APPLIED:-}"
@@ -1291,7 +1558,8 @@ load_state() {
 
   [[ -d "$WALL_DIR" ]] || WALL_DIR="$DEFAULT_WALL_DIR"
   [[ "$RECURSIVE" =~ ^[01]$ ]] || RECURSIVE=1
-  [[ "$BACKEND" == "swww" || "$BACKEND" == "hyprpaper" ]] || BACKEND="swww"
+  [[ "$BACKEND" == "swww" || "$BACKEND" == "hyprpaper" || "$BACKEND" == "mpvpaper" ]] || BACKEND="hyprpaper"
+  [[ "$FILTER_KIND" == "ALL" || "$FILTER_KIND" == "IMAGES" || "$FILTER_KIND" == "GIF" || "$FILTER_KIND" == "MP4" ]] || FILTER_KIND="ALL"
 
   # QoL: never restore previous filter on startup
   FILTER_QUERY=""
@@ -1307,6 +1575,25 @@ load_state() {
 }
 
 # ---------- scan / filter ----------
+file_kind_for_path() {
+  local p="$1" ext
+  ext="${p##*.}"
+  ext="${ext,,}"
+  case "$ext" in
+    gif) printf 'GIF' ;;
+    mp4) printf 'MP4' ;;
+    jpg|jpeg|png|webp|bmp|tif|tiff|avif|jxl) printf 'IMAGES' ;;
+    *) printf 'OTHER' ;;
+  esac
+}
+
+path_matches_filter_kind() {
+  local p="$1" kind
+  [[ "$FILTER_KIND" == "ALL" ]] && return 0
+  kind="$(file_kind_for_path "$p")"
+  [[ "$kind" == "$FILTER_KIND" ]]
+}
+
 scan_wallpapers() {
   local -a find_cmd=()
   ALL_FILES=()
@@ -1329,7 +1616,7 @@ scan_wallpapers() {
   find_cmd+=(
     \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o
        -iname '*.bmp' -o -iname '*.gif' -o -iname '*.tif' -o -iname '*.tiff' -o
-       -iname '*.avif' -o -iname '*.jxl' \)
+       -iname '*.avif' -o -iname '*.jxl' -o -iname '*.mp4' \)
     -print0
   )
 
@@ -1350,17 +1637,20 @@ build_filtered() {
   FILES=()
   q="$(normalize_query "$FILTER_QUERY")"
   q="${q,,}"
-  if [[ -z "$q" ]]; then
-    FILES=("${ALL_FILES[@]}")
-  else
-    for p in "${ALL_FILES[@]}"; do
-      b="$(basename -- "$p")"
-      d="$(dirname -- "$p")"
-      if [[ "${b,,}" == *"$q"* || "${d,,}" == *"$q"* ]]; then
-        FILES+=("$p")
-      fi
-    done
-  fi
+
+  for p in "${ALL_FILES[@]}"; do
+    path_matches_filter_kind "$p" || continue
+    if [[ -z "$q" ]]; then
+      FILES+=("$p")
+      continue
+    fi
+
+    b="$(basename -- "$p")"
+    d="$(dirname -- "$p")"
+    if [[ "${b,,}" == *"$q"* || "${d,,}" == *"$q"* ]]; then
+      FILES+=("$p")
+    fi
+  done
 
   if (( ${#FILES[@]} == 0 )); then
     SEL=0
@@ -1565,10 +1855,10 @@ draw_status_bars() {
   ui_color_reset
 
   ui_goto 2 1; ui_clear_line
-  printf '%-*.*s' "$cols" "$cols"     " dir=$(short_path "$WALL_DIR" 68) recursive=${RECURSIVE} find='$(sanitize_text "$FILTER_QUERY")' "
+  printf '%-*.*s' "$cols" "$cols"     " dir=$(short_path "$WALL_DIR" 60) recursive=${RECURSIVE} type=${FILTER_KIND} find='$(sanitize_text "$FILTER_QUERY")' "
 
   ui_goto 3 1; ui_clear_line; ui_dim
-  printf '%-*.*s' "$cols" "$cols"     " swww: resize=${SWWW_RESIZE} trans=${SWWW_TRANSITION_TYPE} dur=${SWWW_TRANSITION_DURATION}s fps=${SWWW_TRANSITION_FPS} interp=${SWWW_FILTER} | hyprpaper: ${HYPERPAPER_MODE} "
+  printf '%-*.*s' "$cols" "$cols"     " swww: resize=${SWWW_RESIZE} trans=${SWWW_TRANSITION_TYPE} dur=${SWWW_TRANSITION_DURATION}s fps=${SWWW_TRANSITION_FPS} interp=${SWWW_FILTER} | hyprpaper: ${HYPERPAPER_MODE} | mpvpaper: mp4 "
   ui_color_reset
 
   status_tail="$(sanitize_text "$STATUS_MSG")"
@@ -1594,7 +1884,7 @@ draw_empty_grid() {
 
   row=$(( lines - 2 ))
   ui_goto "$row" 1; ui_clear_line; ui_dim
-  printf '%-*.*s' "$cols" "$cols" "keys: q quit | R refresh | f find | b backend | m display | o open dir"
+  printf '%-*.*s' "$cols" "$cols" "keys: q quit | R refresh | f find | e type | b backend | m display | o open dir"
   ui_color_reset
 }
 
@@ -1690,7 +1980,7 @@ draw_help() {
   ui_color_reset
 
   ui_goto "$row2" 1; ui_clear_line; ui_dim
-  printf '%-*.*s' "$cols" "$cols"     " q quit | v version | D dir | n recurse | b backend | m display | z resize | t trans | d dur | p fps | i interp "
+  printf '%-*.*s' "$cols" "$cols"     " q quit | v version | D dir | n recurse | e type | b backend | m display | z resize | t trans | d dur | p fps | i interp "
   ui_color_reset
 }
 
@@ -1699,7 +1989,6 @@ draw_full_ui() {
   calc_grid
   if [[ "${PREVIEW_MODE}" == "kitty" ]]; then kitty_clear_images; fi
 
-  if [[ \"${PREVIEW_MODE}\" == \"kitty\" ]]; then kitty_clear_images; fi
   ui_clear
   draw_status_bars
 
@@ -2061,15 +2350,33 @@ move_sel_grid() {
 }
 
 cycle_backend() {
-  local prev="$BACKEND"
-  if [[ "$BACKEND" == "swww" ]]; then BACKEND="hyprpaper"; else BACKEND="swww"; fi
+  case "$BACKEND" in
+    swww) BACKEND="hyprpaper" ;;
+    hyprpaper) BACKEND="mpvpaper" ;;
+    mpvpaper) BACKEND="swww" ;;
+    *) BACKEND="swww" ;;
+  esac
   save_state
-
-  if [[ "$prev" == "hyprpaper" && "$BACKEND" == "swww" ]]; then
-    takeover_hyprpaper_to_swww
-  fi
-
   msg "Backend: $BACKEND"
+  NEED_FULL_REDRAW=1
+}
+
+cycle_filter_kind() {
+  case "$FILTER_KIND" in
+    ALL) FILTER_KIND="IMAGES" ;;
+    IMAGES) FILTER_KIND="GIF" ;;
+    GIF) FILTER_KIND="MP4" ;;
+    MP4) FILTER_KIND="ALL" ;;
+    *) FILTER_KIND="ALL" ;;
+  esac
+  build_filtered
+  if (( ${#FILES[@]} > 0 )); then
+    SEL=0
+  else
+    SEL=0
+  fi
+  save_state
+  msg "Type: $FILTER_KIND"
   NEED_FULL_REDRAW=1
 }
 
@@ -2286,8 +2593,9 @@ Options:
   -d, --dir PATH          Wallpaper directory (default: ~/Pictures/wallpapers)
   -n, --non-recursive     Disable recursive scanning
   -r, --recursive         Enable recursive scanning
-  -b, --backend NAME      swww | hyprpaper
+  -b, --backend NAME      swww | hyprpaper | mpvpaper
   -o, --output NAME       Target display name or "All displays"
+  --type NAME             all | images | gif | mp4
   --no-sixel              Disable image previews (UI only)
   --alt-screen            Use alternate screen buffer
   --force-encoder NAME    chafa | img2sixel | magick | kitty
@@ -2323,6 +2631,17 @@ parse_args() {
       -o|--output)
         [[ $# -ge 2 ]] || die "Missing value for $1"
         DISPLAY_TARGET="$2"
+        shift 2
+        ;;
+      --type)
+        [[ $# -ge 2 ]] || die "Missing value for $1"
+        case "${2,,}" in
+          all) FILTER_KIND="ALL" ;;
+          images|image|img) FILTER_KIND="IMAGES" ;;
+          gif|gifs) FILTER_KIND="GIF" ;;
+          mp4|video|videos) FILTER_KIND="MP4" ;;
+          *) die "Invalid --type: $2 (use: all | images | gif | mp4)" ;;
+        esac
         shift 2
         ;;
       --no-sixel)
@@ -2368,7 +2687,7 @@ main() {
   load_state
   parse_args "$@"
 
-  [[ "$BACKEND" == "swww" || "$BACKEND" == "hyprpaper" ]] || BACKEND="swww"
+  [[ "$BACKEND" == "swww" || "$BACKEND" == "hyprpaper" || "$BACKEND" == "mpvpaper" ]] || BACKEND="hyprpaper"
 
   # Start position policy (default: start at 1st item)
   if [[ -n "${START_AT}" ]]; then
@@ -2496,6 +2815,9 @@ main() {
         ;;
       n)
         toggle_recursive
+        ;;
+      e)
+        cycle_filter_kind
         ;;
       b)
         cycle_backend
