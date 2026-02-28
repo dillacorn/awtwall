@@ -27,7 +27,7 @@ APP_NAME="awtwall"
 APP_ID="awtwall"
 
 # AWTWALL_VERSION_BLOCK_BEGIN
-AWTWALL_VERSION="${AWTWALL_VERSION:-v1.4}"  # bump for releases
+AWTWALL_VERSION="${AWTWALL_VERSION:-v1.5}"  # bump for releases
 AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
@@ -160,6 +160,8 @@ DISPLAY_TARGET="All displays"   # All displays | output name
 SWWW_CMD=""
 SWWW_DAEMON_CMD=""
 SWWW_PROVIDER=""
+SWWW_DETECT_DONE=0
+SWWW_BACKEND_READY=0
 
 # swww settings (key-adjustable, auto-saved)
 SWWW_RESIZE="crop"              # crop | fit | stretch | no
@@ -188,6 +190,7 @@ HYPERPAPER_MODE="cover"         # cover | contain | center
 : "${WALLPICKER_FORCE_ENCODER:=}"  # chafa|img2sixel|magick|kitty
 : "${WALLPICKER_PREWARM_VISIBLE_PAGE:=0}"  # 0=off (faster startup), 1=warm visible page before draw
 : "${WALLPICKER_SORT_SCAN:=1}"           # 1=stable sort, 0=faster unsorted scan
+: "${AWTWALL_SWWW_ASYNC_APPLY:=1}"       # 1=do not block UI on plain swww transitions
 
 THUMB_CH_W="${WALLPICKER_THUMB_CH_W}"
 THUMB_CH_H="${WALLPICKER_THUMB_CH_H}"
@@ -302,8 +305,8 @@ default_still_backend() {
 }
 
 backend_label() {
-  local normalized
-  if ! normalized="$(normalize_backend_name "$BACKEND" 2>/dev/null)"; then
+  local normalized backend="${1:-$BACKEND}"
+  if ! normalized="$(normalize_backend_name "$backend" 2>/dev/null)"; then
     normalized="$(default_still_backend)"
   fi
   if [[ "$normalized" == "swww" ]]; then
@@ -316,14 +319,25 @@ backend_label() {
   printf '%s' "$normalized"
 }
 
+swww_family_label() {
+  backend_label swww
+}
+
 have_pacman_pkg() {
   have pacman && pacman -Qq "$1" >/dev/null 2>&1
 }
 
 detect_swww_provider() {
+  if (( SWWW_DETECT_DONE == 1 )); then
+    [[ -n "$SWWW_CMD" && -n "$SWWW_DAEMON_CMD" ]]
+    return $?
+  fi
+
+  SWWW_DETECT_DONE=1
   SWWW_CMD=""
   SWWW_DAEMON_CMD=""
   SWWW_PROVIDER=""
+  SWWW_BACKEND_READY=0
 
   # Prefer the swww-compatible interface when it exists.
   # Some awww packages ship compatible swww/swww-daemon binaries, and that path
@@ -645,7 +659,7 @@ takeover_hyprpaper_to_swww() {
     [[ "$saved_backend" == "hyprpaper" ]] || continue
     img="${BACKEND_STATE_MAP[$out]}"
     [[ -n "$img" && -f "$img" ]] || continue
-    run_quiet_hup_safe "$SWWW_CMD" img       --outputs "$out"       --resize "$SWWW_RESIZE"       --transition-type "$SWWW_TRANSITION_TYPE"       --transition-duration "$SWWW_TRANSITION_DURATION"       --transition-fps "$SWWW_TRANSITION_FPS"       --filter "$SWWW_FILTER"       -- "$img" || true
+    run_swww_img_outputs "$out" "$img" || true
     BACKEND_STATE_OUTPUT_BACKEND_MAP["$out"]="swww"
   done
   backend_state_write "swww" || true
@@ -1480,16 +1494,57 @@ resolve_target_outputs() {
 ensure_swww_daemon() {
   local i client daemon
   if ! have_swww_backend; then msg "awww/swww backend not installed"; return 1; fi
+  (( SWWW_BACKEND_READY == 1 )) && return 0
   client="$SWWW_CMD"
   daemon="$SWWW_DAEMON_CMD"
-  if "$client" query >/dev/null 2>&1; then return 0; fi
+  if "$client" query >/dev/null 2>&1; then
+    SWWW_BACKEND_READY=1
+    return 0
+  fi
   spawn_detached "$daemon"
   for i in {1..20}; do
-    if "$client" query >/dev/null 2>&1; then return 0; fi
+    if "$client" query >/dev/null 2>&1; then
+      SWWW_BACKEND_READY=1
+      return 0
+    fi
     sleep 0.2
   done
+  SWWW_BACKEND_READY=0
   msg "$(basename -- "$daemon") did not become ready"
   return 1
+}
+
+run_swww_img_outputs() {
+  local outputs_csv="$1" img="$2" pid i
+  local -a cmd=(
+    "$SWWW_CMD" img
+    --outputs "$outputs_csv"
+    --resize "$SWWW_RESIZE"
+    --transition-type "$SWWW_TRANSITION_TYPE"
+    --transition-duration "$SWWW_TRANSITION_DURATION"
+    --transition-fps "$SWWW_TRANSITION_FPS"
+    --filter "$SWWW_FILTER"
+    -- "$img"
+  )
+
+  if [[ "$SWWW_PROVIDER" == "swww" && "${AWTWALL_SWWW_ASYNC_APPLY}" == "1" ]]; then
+    if have nohup; then
+      nohup "${cmd[@]}" </dev/null >/dev/null 2>&1 &
+    else
+      "${cmd[@]}" </dev/null >/dev/null 2>&1 &
+    fi
+    pid=$!
+    for i in 1 2 3; do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid"
+        return $?
+      fi
+      sleep 0.05
+    done
+    return 0
+  fi
+
+  run_quiet_hup_safe "${cmd[@]}"
 }
 
 ensure_hyprpaper_running() {
@@ -1524,14 +1579,7 @@ release_mpvpaper_for_targets() {
 swww_apply_output() {
   local out="$1" img="$2"
   ensure_swww_daemon || return 1
-  run_quiet_hup_safe "$SWWW_CMD" img \
-    --outputs "$out" \
-    --resize "$SWWW_RESIZE" \
-    --transition-type "$SWWW_TRANSITION_TYPE" \
-    --transition-duration "$SWWW_TRANSITION_DURATION" \
-    --transition-fps "$SWWW_TRANSITION_FPS" \
-    --filter "$SWWW_FILTER" \
-    -- "$img"
+  run_swww_img_outputs "$out" "$img"
 }
 
 hyprpaper_apply_output() {
@@ -1633,14 +1681,7 @@ apply_with_swww() {
   ensure_swww_daemon || return 1
 
   outputs_csv="$(IFS=,; printf '%s' "${TARGET_OUTPUTS[*]}")"
-  if run_quiet_hup_safe "$SWWW_CMD" img \
-      --outputs "$outputs_csv" \
-      --resize "$SWWW_RESIZE" \
-      --transition-type "$SWWW_TRANSITION_TYPE" \
-      --transition-duration "$SWWW_TRANSITION_DURATION" \
-      --transition-fps "$SWWW_TRANSITION_FPS" \
-      --filter "$SWWW_FILTER" \
-      -- "$img"; then
+  if run_swww_img_outputs "$outputs_csv" "$img"; then
     backend_state_set_outputs "swww" "$img" "${TARGET_OUTPUTS[@]}" || true
 
     if (( reapply_hypr == 1 && ${#reapply_hypr_entries[@]} > 0 )); then
@@ -1663,6 +1704,14 @@ apply_with_swww() {
     msg "Applied via $(backend_label) -> $(basename -- "$img")"
     return 0
   fi
+
+  SWWW_BACKEND_READY=0
+  if ensure_swww_daemon && run_swww_img_outputs "$outputs_csv" "$img"; then
+    backend_state_set_outputs "swww" "$img" "${TARGET_OUTPUTS[@]}" || true
+    msg "Applied via $(backend_label) -> $(basename -- "$img")"
+    return 0
+  fi
+
   msg "$(backend_label) apply failed"
   return 1
 }
@@ -1779,7 +1828,7 @@ apply_still_image() {
       if apply_with_swww "$img"; then
         return 0
       fi
-      msg "swww failed, falling back to hyprpaper"
+      msg "$(swww_family_label) failed, falling back to hyprpaper"
       BACKEND="hyprpaper"
       apply_with_hyprpaper "$img"
       return $?
@@ -1875,7 +1924,7 @@ restore_apply_swww_map() {
       (( skipped++ ))
       continue
     fi
-    if run_quiet_hup_safe "$SWWW_CMD" img       --outputs "$out"       --resize "$SWWW_RESIZE"       --transition-type "$SWWW_TRANSITION_TYPE"       --transition-duration "$SWWW_TRANSITION_DURATION"       --transition-fps "$SWWW_TRANSITION_FPS"       --filter "$SWWW_FILTER"       -- "$img"; then
+    if run_swww_img_outputs "$out" "$img"; then
       (( restored++ ))
     else
       (( skipped++ ))
@@ -2449,10 +2498,11 @@ render_tile_x() { printf '%d' $(( 1 + $1 * (CELL_W + GAP_W) )); }
 render_tile_y() { printf '%d' $(( TOP_LINES + 1 + $1 * (CELL_H + GAP_H) )); }
 
 draw_status_bars() {
-  local cols selected_idx status_tail backend_name
+  local cols selected_idx status_tail backend_name swww_name
   cols="$(term_cols)"
   if (( ${#FILES[@]} > 0 )); then selected_idx=$(( SEL + 1 )); else selected_idx=0; fi
   backend_name="$(backend_label)"
+  swww_name="$(swww_family_label)"
 
   ui_goto 1 1; ui_clear_line; ui_bold
   printf '%-*.*s' "$cols" "$cols"     " ${APP_NAME} backend=${backend_name} display=${DISPLAY_TARGET} encoder=${SIXEL_ENCODER_LABEL} "
@@ -2462,7 +2512,7 @@ draw_status_bars() {
   printf '%-*.*s' "$cols" "$cols"     " dir=$(short_path "$WALL_DIR" 60) recursive=${RECURSIVE} type=${FILTER_KIND} find='$(sanitize_text "$FILTER_QUERY")' "
 
   ui_goto 3 1; ui_clear_line; ui_dim
-  printf '%-*.*s' "$cols" "$cols"     " swww: resize=${SWWW_RESIZE} trans=${SWWW_TRANSITION_TYPE} dur=${SWWW_TRANSITION_DURATION}s fps=${SWWW_TRANSITION_FPS} interp=${SWWW_FILTER} | hyprpaper: ${HYPERPAPER_MODE} | mpvpaper: mp4 "
+  printf '%-*.*s' "$cols" "$cols"     " ${swww_name}: resize=${SWWW_RESIZE} trans=${SWWW_TRANSITION_TYPE} dur=${SWWW_TRANSITION_DURATION}s fps=${SWWW_TRANSITION_FPS} interp=${SWWW_FILTER} | hyprpaper: ${HYPERPAPER_MODE} | mpvpaper: mp4 "
   ui_color_reset
 
   status_tail="$(sanitize_text "$STATUS_MSG")"
@@ -2961,7 +3011,7 @@ cycle_backend() {
     *) BACKEND="swww" ;;
   esac
   save_state
-  msg "Backend: $BACKEND"
+  msg "Backend: $(backend_label "$BACKEND")"
   NEED_FULL_REDRAW=1
 }
 
@@ -3012,7 +3062,7 @@ cycle_swww_resize() {
     *) SWWW_RESIZE="crop" ;;
   esac
   save_state
-  msg "swww resize: $SWWW_RESIZE"
+  msg "$(swww_family_label) resize: $SWWW_RESIZE"
   draw_status_bars
 }
 
@@ -3026,21 +3076,21 @@ cycle_swww_transition() {
     *) SWWW_TRANSITION_TYPE="grow" ;;
   esac
   save_state
-  msg "swww transition: $SWWW_TRANSITION_TYPE"
+  msg "$(swww_family_label) transition: $SWWW_TRANSITION_TYPE"
   draw_status_bars
 }
 
 cycle_swww_duration() {
   step_duration_cycle
   save_state
-  msg "swww duration: ${SWWW_TRANSITION_DURATION}s"
+  msg "$(swww_family_label) duration: ${SWWW_TRANSITION_DURATION}s"
   draw_status_bars
 }
 
 cycle_swww_fps() {
   step_fps_cycle
   save_state
-  msg "swww fps: ${SWWW_TRANSITION_FPS}"
+  msg "$(swww_family_label) fps: ${SWWW_TRANSITION_FPS}"
   draw_status_bars
 }
 
@@ -3054,7 +3104,7 @@ cycle_swww_interp() {
     *) SWWW_FILTER="Lanczos3" ;;
   esac
   save_state
-  msg "swww interp: $SWWW_FILTER"
+  msg "$(swww_family_label) interp: $SWWW_FILTER"
   draw_status_bars
 }
 
