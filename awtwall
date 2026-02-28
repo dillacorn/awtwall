@@ -27,7 +27,7 @@ APP_NAME="awtwall"
 APP_ID="awtwall"
 
 # AWTWALL_VERSION_BLOCK_BEGIN
-AWTWALL_VERSION="${AWTWALL_VERSION:-v1.2}"  # bump for releases
+AWTWALL_VERSION="${AWTWALL_VERSION:-v1.3}"  # bump for releases
 AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
@@ -275,6 +275,16 @@ declare -A BACKEND_STATE_MAP=()
 # ---------- helpers ----------
 msg() { STATUS_MSG="$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+backend_label() {
+  if [[ "$BACKEND" == "swww" ]]; then
+    if have awww || have awww-daemon; then
+      printf '%s' "awww"
+      return 0
+    fi
+  fi
+  printf '%s' "$BACKEND"
+}
 
 have_pacman_pkg() {
   have pacman && pacman -Qq "$1" >/dev/null 2>&1
@@ -1955,12 +1965,13 @@ render_tile_x() { printf '%d' $(( 1 + $1 * (CELL_W + GAP_W) )); }
 render_tile_y() { printf '%d' $(( TOP_LINES + 1 + $1 * (CELL_H + GAP_H) )); }
 
 draw_status_bars() {
-  local cols selected_idx status_tail
+  local cols selected_idx status_tail backend_name
   cols="$(term_cols)"
   if (( ${#FILES[@]} > 0 )); then selected_idx=$(( SEL + 1 )); else selected_idx=0; fi
+  backend_name="$(backend_label)"
 
   ui_goto 1 1; ui_clear_line; ui_bold
-  printf '%-*.*s' "$cols" "$cols"     " ${APP_NAME} backend=${BACKEND} display=${DISPLAY_TARGET} encoder=${SIXEL_ENCODER_LABEL} "
+  printf '%-*.*s' "$cols" "$cols"     " ${APP_NAME} backend=${backend_name} display=${DISPLAY_TARGET} encoder=${SIXEL_ENCODER_LABEL} "
   ui_color_reset
 
   ui_goto 2 1; ui_clear_line
