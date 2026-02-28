@@ -2,7 +2,7 @@
 
 awtwall is a fast TUI wallpaper picker for Wayland with image previews, saved settings, and a keyboard-first workflow.
 
-It is built for Hyprland-style setups and applies wallpapers through `swww`, `hyprpaper`, or `mpvpaper`.
+It is built for Hyprland-style setups and applies wallpapers through `awww` or `swww`, `hyprpaper`, or `mpvpaper`.
 
 <a href="./awtwall_video.webm">
   <img src="./awtwall_preview.gif" alt="Watch awtwall demo" width="700">
@@ -18,7 +18,7 @@ It is built for Hyprland-style setups and applies wallpapers through `swww`, `hy
   - SIXEL via ImageMagick built with SIXEL support
   - kitty image previews in kitty terminals
 - Wallpaper backends:
-  - `swww` for still images
+  - `awww` or `swww` for still images
   - `hyprpaper` for still images
   - `mpvpaper` for `.mp4` video wallpapers
 - Saved settings and last selection
@@ -30,7 +30,6 @@ It is built for Hyprland-style setups and applies wallpapers through `swww`, `hy
 
 Required:
 
-- `hyprland` for `hyprctl`
 - `imagemagick` for `magick`
 - `ncurses` for `tput`
 
@@ -41,14 +40,16 @@ Preview support requires one of the following unless previews are disabled:
 - ImageMagick built with SIXEL support
 - `kitty` for kitty image previews when running inside kitty
 
-Wallpaper backend:
+Install at least one wallpaper backend:
 
-- `swww`
-- or `hyprpaper`
-- or `mpvpaper` for `.mp4` wallpapers
+- `awww-bin` or `awww-git` for the preferred still-image backend
+- `swww` for the fallback still-image backend
+- `hyprpaper` for still images
+- `mpvpaper` for `.mp4` wallpapers
 
 Optional:
 
+- `hyprland` for `hyprctl`, `hyprpaper`, and better monitor detection on Hyprland setups
 - `ffmpeg` for better `.mp4` thumbnail extraction
 - `jq` for better monitor detection
 - `xdg-utils` for opening the wallpaper directory
@@ -177,9 +178,11 @@ awtwall supports multiple preview paths:
 
 ## Backends
 
-### `swww`
+### `awww` / `swww`
 
 Best for still-image wallpapers with transition controls.
+
+If `awww` is installed, awtwall prefers it automatically since it is the continuation of the original `swww` project. If `awww` is not installed, awtwall falls back to `swww`.
 
 ### `hyprpaper`
 
@@ -234,7 +237,7 @@ Used for `.mp4` video wallpapers.
 
 - Default wallpaper directory: `~/Pictures/wallpapers`
 - Recursive scanning: enabled
-- Default backend: `swww`
+- Default backend: `swww` (unless `awww` is installed)
 - Default display target: `All displays`
 
 ## State and cache

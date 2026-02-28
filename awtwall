@@ -16,15 +16,18 @@ IFS=$'\n\t'
 # - count line renamed to total/shown
 # - startup never restores previous find filter
 
-# Arch deps (repo): 
-#    sudo pacman -S --needed imagemagick libsixel swww jq xdg-utils   # libsixel provides img2sixel
-# Optional backends (repo): sudo pacman -S --needed hyprpaper mpvpaper
+# Arch deps (repo):
+#    sudo pacman -S --needed imagemagick libsixel jq xdg-utils   # libsixel provides img2sixel
+# Optional backends:
+#    AUR (preferred): awww-bin or awww-git   # backend=swww; awww takes priority when present
+#    Repo fallback:   swww
+#    Repo optional:   hyprpaper mpvpaper
 
 APP_NAME="awtwall"
 APP_ID="awtwall"
 
 # AWTWALL_VERSION_BLOCK_BEGIN
-AWTWALL_VERSION="${AWTWALL_VERSION:-v1.1}"  # bump for releases
+AWTWALL_VERSION="${AWTWALL_VERSION:-v1.2}"  # bump for releases
 AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
@@ -154,6 +157,9 @@ RECURSIVE=1
 
 BACKEND="swww"                  # swww | hyprpaper | mpvpaper
 DISPLAY_TARGET="All displays"   # All displays | output name
+SWWW_CMD=""
+SWWW_DAEMON_CMD=""
+SWWW_PROVIDER=""
 
 # swww settings (key-adjustable, auto-saved)
 SWWW_RESIZE="crop"              # crop | fit | stretch | no
@@ -269,6 +275,92 @@ declare -A BACKEND_STATE_MAP=()
 # ---------- helpers ----------
 msg() { STATUS_MSG="$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+have_pacman_pkg() {
+  have pacman && pacman -Qq "$1" >/dev/null 2>&1
+}
+
+detect_swww_provider() {
+  SWWW_CMD=""
+  SWWW_DAEMON_CMD=""
+  SWWW_PROVIDER=""
+
+  if have awww && have awww-daemon; then
+    SWWW_CMD="awww"
+    SWWW_DAEMON_CMD="awww-daemon"
+    SWWW_PROVIDER="awww"
+    return 0
+  fi
+
+  if ( have_pacman_pkg awww-bin || have_pacman_pkg awww-git || have_pacman_pkg awww ) && have swww && have swww-daemon; then
+    SWWW_CMD="swww"
+    SWWW_DAEMON_CMD="swww-daemon"
+    SWWW_PROVIDER="awww"
+    return 0
+  fi
+
+  if have swww && have swww-daemon; then
+    SWWW_CMD="swww"
+    SWWW_DAEMON_CMD="swww-daemon"
+    SWWW_PROVIDER="swww"
+    return 0
+  fi
+
+  if have awww; then
+    SWWW_CMD="awww"
+    SWWW_PROVIDER="awww"
+  elif have swww; then
+    SWWW_CMD="swww"
+    SWWW_PROVIDER="swww"
+  fi
+
+  if have awww-daemon; then
+    SWWW_DAEMON_CMD="awww-daemon"
+    SWWW_PROVIDER="awww"
+  elif have swww-daemon; then
+    SWWW_DAEMON_CMD="swww-daemon"
+    [[ -n "$SWWW_PROVIDER" ]] || SWWW_PROVIDER="swww"
+  fi
+
+  return 1
+}
+
+have_swww_backend() {
+  detect_swww_provider >/dev/null 2>&1
+  [[ -n "$SWWW_CMD" && -n "$SWWW_DAEMON_CMD" ]]
+}
+
+backend_is_available() {
+  case "$1" in
+    swww) have_swww_backend ;;
+    hyprpaper) have hyprpaper && have hyprctl ;;
+    mpvpaper) have mpvpaper ;;
+    *) return 1 ;;
+  esac
+}
+
+pick_first_available_backend() {
+  local cand
+  for cand in swww hyprpaper mpvpaper; do
+    if backend_is_available "$cand"; then
+      BACKEND="$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ensure_backend_available() {
+  local wanted="$BACKEND"
+  if backend_is_available "$wanted"; then
+    return 0
+  fi
+  pick_first_available_backend || return 1
+  if [[ "$BACKEND" != "$wanted" ]]; then
+    msg "Backend unavailable, using $BACKEND"
+  fi
+  return 0
+}
 
 backend_state_read() {
   BACKEND_STATE_BACKEND=""
@@ -446,7 +538,7 @@ takeover_hyprpaper_to_swww() {
   for out in "${!BACKEND_STATE_MAP[@]}"; do
     img="${BACKEND_STATE_MAP[$out]}"
     [[ -n "$img" && -f "$img" ]] || continue
-    run_quiet_hup_safe swww img \
+    run_quiet_hup_safe "$SWWW_CMD" img \
       --outputs "$out" \
       --resize "$SWWW_RESIZE" \
       --transition-type "$SWWW_TRANSITION_TYPE" \
@@ -889,7 +981,6 @@ print_requirements_help() {
 awtwall requirements (Arch Linux)
 
 Required:
-  hyprland (hyprctl)
   imagemagick (magick)
   ncurses (tput)
   one preview encoder unless WALLPICKER_NO_SIXEL=1:
@@ -897,10 +988,11 @@ Required:
     libsixel (img2sixel)
     OR ImageMagick built with SIXEL
 
-Backends:
-  swww      (backend=swww)
-  hyprpaper (backend=hyprpaper)
-  mpvpaper  (backend=mpvpaper, for .mp4 wallpapers)
+Wallpaper backends (install at least one):
+  awww-bin or awww-git (preferred; backend=swww)
+  swww                 (fallback; backend=swww)
+  hyprpaper + hyprctl  (backend=hyprpaper)
+  mpvpaper             (backend=mpvpaper, for .mp4 wallpapers)
 
 Optional:
   ffmpeg    (better .mp4 thumbnail extraction)
@@ -921,26 +1013,42 @@ check_runtime_requirements() {
     fi
   done
 
-  if ! have hyprctl; then
-    missing_cmds+=("hyprctl (package: hyprland)")
+  if ! ensure_backend_available; then
+    missing_cmds+=("install at least one wallpaper backend:")
+    missing_cmds+=("awww-bin or awww-git (preferred), or swww")
+    missing_cmds+=("hyprpaper + hyprctl (package: hyprland)")
+    missing_cmds+=("mpvpaper")
     missing=1
+  else
+    case "$BACKEND" in
+      swww)
+        if ! have_swww_backend; then
+          missing_cmds+=("awww-bin or awww-git (preferred), or swww")
+          missing=1
+        fi
+        ;;
+      hyprpaper)
+        if ! have hyprpaper; then
+          missing_cmds+=("hyprpaper (package: hyprpaper)")
+          missing=1
+        fi
+        if ! have hyprctl; then
+          missing_cmds+=("hyprctl (package: hyprland, needed for hyprpaper)")
+          missing=1
+        fi
+        ;;
+      mpvpaper)
+        if ! have mpvpaper; then
+          missing_cmds+=("mpvpaper (package: mpvpaper)")
+          missing=1
+        fi
+        ;;
+      *)
+        missing_cmds+=("invalid backend '$BACKEND'")
+        missing=1
+        ;;
+    esac
   fi
-
-  case "$BACKEND" in
-    swww)
-      if ! have swww; then missing_cmds+=("swww (package: swww)"); missing=1; fi
-      ;;
-    hyprpaper)
-      if ! have hyprpaper; then missing_cmds+=("hyprpaper (package: hyprpaper)"); missing=1; fi
-      ;;
-    mpvpaper)
-      if ! have mpvpaper; then missing_cmds+=("mpvpaper (package: mpvpaper)"); missing=1; fi
-      ;;
-    *)
-      missing_cmds+=("invalid backend '$BACKEND'")
-      missing=1
-      ;;
-  esac
 
   if ! have magick; then
     missing_cmds+=("magick (package: imagemagick)")
@@ -1233,14 +1341,14 @@ refresh_display_choices() {
     done < <(hyprctl -j monitors 2>/dev/null | jq -r '.[].name // empty' 2>/dev/null || true)
   fi
 
-  if (( ${#DISPLAY_CHOICES[@]} == 1 )) && have swww; then
+  if (( ${#DISPLAY_CHOICES[@]} == 1 )) && have_swww_backend; then
     while IFS= read -r name; do
       [[ -n "$name" ]] || continue
       if [[ -z "${seen[$name]:-}" ]]; then
         DISPLAY_CHOICES+=("$name")
         seen["$name"]=1
       fi
-    done < <(swww query 2>/dev/null | sed -n 's/^\([^:]*\):.*/\1/p' || true)
+    done < <("$SWWW_CMD" query 2>/dev/null | sed -n 's/^\([^:]*\):.*/\1/p' || true)
   fi
 
   for item in "${DISPLAY_CHOICES[@]}"; do
@@ -1270,16 +1378,17 @@ resolve_target_outputs() {
 }
 
 ensure_swww_daemon() {
-  local i
-  if ! have swww; then msg "swww not installed"; return 1; fi
-  if swww query >/dev/null 2>&1; then return 0; fi
-  if ! have swww-daemon; then msg "swww-daemon not installed"; return 1; fi
-  (nohup swww-daemon >/dev/null 2>&1 &) || true
+  local i client daemon
+  if ! have_swww_backend; then msg "awww/swww backend not installed"; return 1; fi
+  client="$SWWW_CMD"
+  daemon="$SWWW_DAEMON_CMD"
+  if "$client" query >/dev/null 2>&1; then return 0; fi
+  (nohup "$daemon" >/dev/null 2>&1 &) || true
   for i in {1..20}; do
-    if swww query >/dev/null 2>&1; then return 0; fi
+    if "$client" query >/dev/null 2>&1; then return 0; fi
     sleep 0.2
   done
-  msg "swww-daemon did not become ready"
+  msg "$(basename -- "$daemon") did not become ready"
   return 1
 }
 
