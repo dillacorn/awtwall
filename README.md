@@ -1,8 +1,8 @@
 # awtwall
 
-awtwall is a fast TUI wallpaper picker for Wayland with image previews, saved settings, and a keyboard-first workflow.
+awtwall is a fast TUI wallpaper picker for Wayland with image previews, saved settings, and keyboard-first controls.
 
-It is built for Hyprland-style setups and applies wallpapers through `awww` or `swww`, `hyprpaper`, or `mpvpaper`.
+It supports still images, GIFs, and MP4 wallpapers through `swww` / `awww`, `hyprpaper`, or `mpvpaper`.
 
 <a href="./awtwall_video.webm">
   <img src="./awtwall_preview.gif" alt="Watch awtwall demo" width="700">
@@ -10,50 +10,42 @@ It is built for Hyprland-style setups and applies wallpapers through `awww` or `
 
 ## Features
 
-- Fast TUI wallpaper browser
+- Fast terminal wallpaper browser
 - Keyboard-first workflow with mouse support
-- Preview support with:
-  - SIXEL via `img2sixel`
-  - SIXEL via `chafa`
-  - SIXEL via ImageMagick built with SIXEL support
-  - kitty image previews in kitty terminals
-- Wallpaper backends:
-  - `awww` or `swww` for still images
-  - `hyprpaper` for still images
-  - `mpvpaper` for `.mp4` video wallpapers
-- Saved settings and last selection
+- Image previews with `kitty`, `img2sixel`, `chafa`, or ImageMagick with SIXEL support
+- Supports `swww` / `awww`, `hyprpaper`, and `mpvpaper`
+- Saved settings, last selection, and restore support
 - Recursive or non-recursive wallpaper scanning
-- Media type filtering for images, GIFs, and MP4s
+- Media filtering for images, GIFs, and MP4s
 - Built-in version check
 
 ## Requirements
 
 Required:
 
-- `imagemagick` for `magick`
-- `ncurses` for `tput`
+- `imagemagick`
+- `ncurses`
 
-Preview support requires one of the following unless previews are disabled:
+Preview support requires at least one of:
 
 - `chafa`
 - `libsixel` for `img2sixel`
 - ImageMagick built with SIXEL support
-- `kitty` for kitty image previews when running inside kitty
+- `kitty` for kitty image previews
 
 Install at least one wallpaper backend:
 
-- `awww-bin` or `awww-git` for the preferred still-image backend
-- `swww` for the fallback still-image backend
-- `hyprpaper` for still images
-- `mpvpaper` for `.mp4` wallpapers
+- `swww` or `awww`
+- `hyprpaper`
+- `mpvpaper`
 
 Optional:
 
-- `hyprland` for `hyprctl`, `hyprpaper`, and better monitor detection on Hyprland setups
-- `ffmpeg` for better `.mp4` thumbnail extraction
-- `jq` for better monitor detection
-- `xdg-utils` for opening the wallpaper directory
-- `kitty` for kitty image previews
+- `hyprland`
+- `ffmpeg`
+- `jq`
+- `xdg-utils`
+- `kitty`
 
 ## Install
 
@@ -86,6 +78,12 @@ awtwall
 awtwall [options]
 ```
 
+Restore the last applied wallpaper state without opening the UI:
+
+```bash
+awtwall --restore
+```
+
 ## Launch options
 
 ```text
@@ -95,149 +93,82 @@ awtwall [options]
 -b, --backend NAME      swww | hyprpaper | mpvpaper
 -o, --output NAME       Target display name or "All displays"
 --type NAME             all | images | gif | mp4
---no-sixel              Disable image previews (UI only)
+--no-sixel              Disable image previews
 --alt-screen            Use alternate screen buffer
 --force-encoder NAME    chafa | img2sixel | magick | kitty
--h, --help              Show help
--v, --version           Print version and check latest release
 --resume                Start at last saved selection
 --start-at N            Start at selection index N (1-based)
+--restore               Reapply the last saved wallpaper state and exit
+-h, --help              Show help
+-v, --version           Print version and check latest release
 ```
 
 ## Examples
 
-Use the default wallpaper directory:
-
 ```bash
 awtwall
-```
-
-Open a different wallpaper directory:
-
-```bash
 awtwall --dir ~/Pictures/wallpapers
-```
-
-Use `hyprpaper` instead of `swww`:
-
-```bash
 awtwall --backend hyprpaper
-```
-
-Use `mpvpaper` for video wallpapers:
-
-```bash
 awtwall --backend mpvpaper --type mp4
-```
-
-Show only still images:
-
-```bash
 awtwall --type images
-```
-
-Start at the last saved selection:
-
-```bash
 awtwall --resume
-```
-
-Start at item 25:
-
-```bash
 awtwall --start-at 25
-```
-
-Force a specific preview encoder:
-
-```bash
 awtwall --force-encoder img2sixel
-```
-
-Disable previews:
-
-```bash
 awtwall --no-sixel
-```
-
-Use the alternate screen buffer:
-
-```bash
 awtwall --alt-screen
+awtwall --restore
 ```
 
 ## Preview backends
 
-awtwall supports multiple preview paths:
+awtwall supports these preview methods:
 
-- `kitty` image previews in kitty terminals
+- `kitty`
 - `img2sixel`
 - `chafa`
 - `magick` with SIXEL support
 - preview-disabled mode with `--no-sixel`
 
-## Backends
+## Wallpaper backends
 
-### `awww` / `swww`
+### `swww` / `awww`
 
-Best for still-image wallpapers with transition controls.
+Best for still-image wallpapers with transition support.
 
-If `awww` is installed, awtwall prefers it automatically since it is the continuation of the original `swww` project. If `awww` is not installed, awtwall falls back to `swww`.
+awtwall uses `swww` when available and falls back to `awww` when needed.
 
 ### `hyprpaper`
 
-Best for still-image wallpapers when you prefer Hyprland's wallpaper daemon behavior.
+Best for still-image wallpapers if you prefer Hyprland's wallpaper daemon behavior.
 
 ### `mpvpaper`
 
 Used for `.mp4` video wallpapers.
 
-`mpvpaper` is only for `.mp4` files. If you select a still image while `mpvpaper` is set, awtwall falls back to `hyprpaper`.
+If `mpvpaper` is selected for a still image, awtwall falls back to a still-image backend.
 
-## In-app controls
+## Controls
 
-### Navigation
+awtwall is built to be used directly from the keyboard, with mouse support included.
 
-- `Arrow keys` move selection
-- `h`, `j`, `k`, `l` move selection
-- `PgUp` jumps up 6 items
-- `PgDn` jumps down 6 items
-- `Home` jumps to the first item
-- `End` jumps to the last item
-- `Mouse wheel` scrolls through wallpapers
+Main controls:
 
-### Actions
+- Arrow keys or `h j k l` to move
+- `Space` or `Enter` to apply
+- `r` for random
+- `f` to find
+- `R` to refresh
+- `b` to cycle backend
+- `m` to cycle display target
+- `q` to quit
 
-- `Mouse left click` applies the selected wallpaper
-- `SPACE` applies the selected wallpaper
-- `Enter` also applies on terminals that send it cleanly
-- `r` applies a random wallpaper
-- `f` opens find
-- `c` clears find
-- `R` refreshes the wallpaper list
-- `D` changes wallpaper directory
-- `o` opens the current wallpaper directory
-- `x` clears the preview cache
-- `q` quits
-
-### Settings
-
-- `n` toggles recursive scan
-- `e` cycles media type filter
-- `b` cycles backend
-- `m` cycles display target
-- `z` cycles `swww` resize mode
-- `t` cycles `swww` transition type
-- `d` cycles `swww` transition duration
-- `p` cycles `swww` transition FPS
-- `i` cycles `swww` interpolation filter
-- `P` cycles `hyprpaper` mode
+Most other settings can be changed in-app and are visible in the interface.
 
 ## Defaults
 
-- Default wallpaper directory: `~/Pictures/wallpapers`
+- Wallpaper directory: `~/Pictures/wallpapers`
 - Recursive scanning: enabled
-- Default backend: `swww` (unless `awww` is installed)
+- Default backend: `swww`
 - Default display target: `All displays`
 
 ## State and cache
@@ -252,18 +183,15 @@ awtwall stores data in:
 This includes:
 
 - saved UI state
-- backend state
+- saved backend state
 - thumbnail cache
 - preview cache
-- debug and preview error logs
+- debug logs
 
-## Version check
-
-Show local version and check the latest release:
+## Version
 
 ```bash
 awtwall -v
-# or
 awtwall --version
 ```
 
@@ -271,7 +199,7 @@ awtwall --version
 
 [MIT](https://github.com/dillacorn/awtwall/blob/main/LICENSE)
 
-## ☕ Donate
+## Donate
 
 Built and maintained out of passion. Always FOSS. Donations appreciated.  
 [Donate via PayPal](https://www.paypal.com/donate/?business=XSNV4QP8JFY9Y&no_recurring=0&item_name=Built+and+maintained+out+of+passion.+Always+FOSS.+Donations+appreciated.+%28smtty%2C+MicLockTray%2C+awtarchy%29&currency_code=USD)

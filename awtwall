@@ -27,7 +27,7 @@ APP_NAME="awtwall"
 APP_ID="awtwall"
 
 # AWTWALL_VERSION_BLOCK_BEGIN
-AWTWALL_VERSION="${AWTWALL_VERSION:-v1.3}"  # bump for releases
+AWTWALL_VERSION="${AWTWALL_VERSION:-v1.4}"  # bump for releases
 AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
@@ -242,6 +242,7 @@ UI_ACTIVE=0
 HYPERPAPER_JUST_STARTED=0
 
 RESUME_LAST=0               # --resume (start where you last were)
+RESTORE_ONLY=0              # --restore (reapply saved wallpapers and exit)
 START_AT=""                 # --start-at N (1-based)
 LAST_SEL=0                  # persisted selection index
 LAST_FOCUS=""              # persisted last focused wallpaper path
@@ -271,19 +272,48 @@ declare -A HASH_CACHE=()
 
 BACKEND_STATE_BACKEND=""
 declare -A BACKEND_STATE_MAP=()
+declare -A BACKEND_STATE_OUTPUT_BACKEND_MAP=()
 
 # ---------- helpers ----------
 msg() { STATUS_MSG="$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+normalize_backend_name() {
+  local backend="${1:-}"
+  backend="${backend,,}"
+  case "$backend" in
+    swww|awww) printf '%s' "swww" ;;
+    hyprpaper) printf '%s' "hyprpaper" ;;
+    mpvpaper) printf '%s' "mpvpaper" ;;
+    *) return 1 ;;
+  esac
+}
+
+default_still_backend() {
+  if backend_is_available swww; then
+    printf '%s' "swww"
+    return 0
+  fi
+  if backend_is_available hyprpaper; then
+    printf '%s' "hyprpaper"
+    return 0
+  fi
+  printf '%s' "swww"
+}
+
 backend_label() {
-  if [[ "$BACKEND" == "swww" ]]; then
-    if have awww || have awww-daemon; then
+  local normalized
+  if ! normalized="$(normalize_backend_name "$BACKEND" 2>/dev/null)"; then
+    normalized="$(default_still_backend)"
+  fi
+  if [[ "$normalized" == "swww" ]]; then
+    detect_swww_provider >/dev/null 2>&1 || true
+    if [[ "$SWWW_PROVIDER" == "awww" ]]; then
       printf '%s' "awww"
       return 0
     fi
   fi
-  printf '%s' "$BACKEND"
+  printf '%s' "$normalized"
 }
 
 have_pacman_pkg() {
@@ -295,24 +325,24 @@ detect_swww_provider() {
   SWWW_DAEMON_CMD=""
   SWWW_PROVIDER=""
 
+  # Prefer the swww-compatible interface when it exists.
+  # Some awww packages ship compatible swww/swww-daemon binaries, and that path
+  # is more reliable than native awww commands for persistent wallpaper state.
+  if have swww && have swww-daemon; then
+    SWWW_CMD="swww"
+    SWWW_DAEMON_CMD="swww-daemon"
+    if have_pacman_pkg awww-bin || have_pacman_pkg awww-git || have_pacman_pkg awww; then
+      SWWW_PROVIDER="awww"
+    else
+      SWWW_PROVIDER="swww"
+    fi
+    return 0
+  fi
+
   if have awww && have awww-daemon; then
     SWWW_CMD="awww"
     SWWW_DAEMON_CMD="awww-daemon"
     SWWW_PROVIDER="awww"
-    return 0
-  fi
-
-  if ( have_pacman_pkg awww-bin || have_pacman_pkg awww-git || have_pacman_pkg awww ) && have swww && have swww-daemon; then
-    SWWW_CMD="swww"
-    SWWW_DAEMON_CMD="swww-daemon"
-    SWWW_PROVIDER="awww"
-    return 0
-  fi
-
-  if have swww && have swww-daemon; then
-    SWWW_CMD="swww"
-    SWWW_DAEMON_CMD="swww-daemon"
-    SWWW_PROVIDER="swww"
     return 0
   fi
 
@@ -349,6 +379,23 @@ backend_is_available() {
   esac
 }
 
+spawn_detached() {
+  (( $# > 0 )) || return 1
+
+  if have setsid; then
+    ( setsid "$@" </dev/null >/dev/null 2>&1 & ) || true
+    return 0
+  fi
+
+  if have nohup; then
+    ( nohup "$@" </dev/null >/dev/null 2>&1 & ) || true
+    return 0
+  fi
+
+  ( "$@" </dev/null >/dev/null 2>&1 & ) || true
+  return 0
+}
+
 pick_first_available_backend() {
   local cand
   for cand in swww hyprpaper mpvpaper; do
@@ -375,44 +422,93 @@ ensure_backend_available() {
 backend_state_read() {
   BACKEND_STATE_BACKEND=""
   BACKEND_STATE_MAP=()
+  BACKEND_STATE_OUTPUT_BACKEND_MAP=()
   [[ -f "$BACKEND_STATE_FILE" ]] || return 0
-  local k v
-  while IFS=$'\t' read -r k v; do
+  local k v rest out_backend out_img normalized
+  while IFS=$'\t' read -r k v rest; do
     [[ -z "${k:-}" ]] && continue
     if [[ "$k" == "backend" ]]; then
-      BACKEND_STATE_BACKEND="$v"
+      if normalized="$(normalize_backend_name "$v" 2>/dev/null)"; then
+        BACKEND_STATE_BACKEND="$normalized"
+      else
+        BACKEND_STATE_BACKEND="$v"
+      fi
       continue
     fi
-    BACKEND_STATE_MAP["$k"]="$v"
+
+    out_backend=""
+    out_img="$v"
+    if [[ -n "${rest:-}" ]]; then
+      out_backend="$v"
+      out_img="$rest"
+      if normalized="$(normalize_backend_name "$out_backend" 2>/dev/null)"; then
+        BACKEND_STATE_OUTPUT_BACKEND_MAP["$k"]="$normalized"
+      fi
+    fi
+
+    BACKEND_STATE_MAP["$k"]="$out_img"
   done < "$BACKEND_STATE_FILE"
   return 0
 }
 
+backend_state_output_backend_for() {
+  local out="$1" backend normalized
+  backend="${BACKEND_STATE_OUTPUT_BACKEND_MAP[$out]:-}"
+  if [[ -n "$backend" ]]; then
+    if normalized="$(normalize_backend_name "$backend" 2>/dev/null)"; then
+      printf '%s' "$normalized"
+      return 0
+    fi
+  fi
+
+  backend="${BACKEND_STATE_BACKEND:-}"
+  if [[ -n "$backend" ]]; then
+    if normalized="$(normalize_backend_name "$backend" 2>/dev/null)"; then
+      printf '%s' "$normalized"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 backend_state_write() {
-  local backend="$1" tmp
+  local backend="$1" tmp k output_backend output_img normalized
+  if normalized="$(normalize_backend_name "$backend" 2>/dev/null)"; then
+    backend="$normalized"
+  fi
   mkdir -p -- "$CONFIG_DIR"
   tmp="${BACKEND_STATE_FILE}.tmp.$$"
   {
     printf 'backend\t%s\n' "$backend"
     for k in "${!BACKEND_STATE_MAP[@]}"; do
-      printf '%s\t%s\n' "$k" "${BACKEND_STATE_MAP[$k]}"
+      output_backend="${BACKEND_STATE_OUTPUT_BACKEND_MAP[$k]:-$backend}"
+      output_img="${BACKEND_STATE_MAP[$k]}"
+      printf '%s\t%s\t%s\n' "$k" "$output_backend" "$output_img"
     done | LC_ALL=C sort
   } > "$tmp"
   mv -f -- "$tmp" "$BACKEND_STATE_FILE"
 }
 
 backend_state_set_outputs() {
-  local backend="$1" img="$2"; shift 2
+  local backend="$1" img="$2" normalized out
+  shift 2
+  if normalized="$(normalize_backend_name "$backend" 2>/dev/null)"; then
+    backend="$normalized"
+  fi
   backend_state_read
-  local out
   for out in "$@"; do
     BACKEND_STATE_MAP["$out"]="$img"
+    BACKEND_STATE_OUTPUT_BACKEND_MAP["$out"]="$backend"
   done
   backend_state_write "$backend"
 }
 
 backend_state_set_backend_only() {
-  local backend="$1"
+  local backend="$1" normalized
+  if normalized="$(normalize_backend_name "$backend" 2>/dev/null)"; then
+    backend="$normalized"
+  fi
   backend_state_read
   backend_state_write "$backend"
 }
@@ -527,9 +623,9 @@ start_mpvpaper_detached() {
   have mpvpaper || return 1
 
   if have nohup; then
-    nohup mpvpaper -o "no-audio --loop-file=inf" "$target" "$img" </dev/null >/dev/null 2>&1 &
+    spawn_detached mpvpaper -o "no-audio --loop-file=inf" "$target" "$img"
   else
-    mpvpaper -o "no-audio --loop-file=inf" "$target" "$img" </dev/null >/dev/null 2>&1 &
+    spawn_detached mpvpaper -o "no-audio --loop-file=inf" "$target" "$img"
   fi
 
   sleep 0.25
@@ -540,27 +636,21 @@ start_mpvpaper_detached() {
 takeover_hyprpaper_to_swww() {
   # Kill hyprpaper and reapply the last-known per-output wallpapers via swww.
   backend_state_read
-  [[ "$BACKEND_STATE_BACKEND" == "hyprpaper" ]] || { kill_hyprpaper_if_running; return 0; }
   ensure_swww_daemon || { kill_hyprpaper_if_running; return 0; }
   kill_hyprpaper_if_running
 
-  local out img
+  local out img saved_backend
   for out in "${!BACKEND_STATE_MAP[@]}"; do
+    saved_backend="$(backend_state_output_backend_for "$out" 2>/dev/null || true)"
+    [[ "$saved_backend" == "hyprpaper" ]] || continue
     img="${BACKEND_STATE_MAP[$out]}"
     [[ -n "$img" && -f "$img" ]] || continue
-    run_quiet_hup_safe "$SWWW_CMD" img \
-      --outputs "$out" \
-      --resize "$SWWW_RESIZE" \
-      --transition-type "$SWWW_TRANSITION_TYPE" \
-      --transition-duration "$SWWW_TRANSITION_DURATION" \
-      --transition-fps "$SWWW_TRANSITION_FPS" \
-      --filter "$SWWW_FILTER" \
-      -- "$img" || true
+    run_quiet_hup_safe "$SWWW_CMD" img       --outputs "$out"       --resize "$SWWW_RESIZE"       --transition-type "$SWWW_TRANSITION_TYPE"       --transition-duration "$SWWW_TRANSITION_DURATION"       --transition-fps "$SWWW_TRANSITION_FPS"       --filter "$SWWW_FILTER"       -- "$img" || true
+    BACKEND_STATE_OUTPUT_BACKEND_MAP["$out"]="swww"
   done
-  backend_state_set_backend_only "swww" || true
+  backend_state_write "swww" || true
   return 0
 }
-
 debug() {
   if [[ "${WALLPICKER_DEBUG}" == "1" ]]; then
     printf 'awtwall(debug): %s\n' "$*" >&2
@@ -722,7 +812,7 @@ hyprctl_quiet() {
 restart_hyprpaper() {
   if have pkill; then pkill -x hyprpaper >/dev/null 2>&1 || true; fi
   if have killall; then killall hyprpaper >/dev/null 2>&1 || true; fi
-  (nohup hyprpaper >/dev/null 2>&1 &) || true
+  spawn_detached hyprpaper
 }
 
 
@@ -1393,7 +1483,7 @@ ensure_swww_daemon() {
   client="$SWWW_CMD"
   daemon="$SWWW_DAEMON_CMD"
   if "$client" query >/dev/null 2>&1; then return 0; fi
-  (nohup "$daemon" >/dev/null 2>&1 &) || true
+  spawn_detached "$daemon"
   for i in {1..20}; do
     if "$client" query >/dev/null 2>&1; then return 0; fi
     sleep 0.2
@@ -1410,7 +1500,7 @@ ensure_hyprpaper_running() {
     return 0
   fi
   HYPERPAPER_JUST_STARTED=1
-  (nohup hyprpaper >/dev/null 2>&1 &) || true
+  spawn_detached hyprpaper
   for i in {1..40}; do
     is_hyprpaper_running && return 0
     sleep 0.1
@@ -1431,29 +1521,151 @@ release_mpvpaper_for_targets() {
   return 0
 }
 
+swww_apply_output() {
+  local out="$1" img="$2"
+  ensure_swww_daemon || return 1
+  run_quiet_hup_safe "$SWWW_CMD" img \
+    --outputs "$out" \
+    --resize "$SWWW_RESIZE" \
+    --transition-type "$SWWW_TRANSITION_TYPE" \
+    --transition-duration "$SWWW_TRANSITION_DURATION" \
+    --transition-fps "$SWWW_TRANSITION_FPS" \
+    --filter "$SWWW_FILTER" \
+    -- "$img"
+}
+
+hyprpaper_apply_output() {
+  local out="$1" img="$2" arg ext try ok
+  local t max_tries ctl_t t_fast
+
+  ext="${img##*.}"
+  ext="${ext,,}"
+  if [[ "$ext" == "gif" || "$ext" == "mp4" ]]; then
+    return 1
+  fi
+
+  ensure_hyprpaper_running || return 1
+
+  t="${HYPERPAPER_TIMEOUT:-3}"
+  t_fast="${HYPERPAPER_STARTUP_TIMEOUT:-0.4}"
+  max_tries=1
+  if (( HYPERPAPER_JUST_STARTED == 1 )); then
+    max_tries=8
+  fi
+
+  ok=0
+  try=0
+  while (( try < max_tries )); do
+    ctl_t="$t"
+    if (( HYPERPAPER_JUST_STARTED == 1 && try < max_tries - 1 )); then
+      ctl_t="$t_fast"
+    fi
+    arg="${out}, ${img}, ${HYPERPAPER_MODE}"
+    if hyprpaper_ctl "$ctl_t" wallpaper "$arg"; then
+      ok=1
+      break
+    fi
+    arg="${out}, ${img}"
+    if hyprpaper_ctl "$ctl_t" wallpaper "$arg"; then
+      ok=1
+      break
+    fi
+    (( try++ ))
+    sleep 0.1
+  done
+
+  HYPERPAPER_JUST_STARTED=0
+  (( ok == 1 ))
+}
+
+mpvpaper_apply_output() {
+  local out="$1" img="$2" ext
+  ext="${img##*.}"
+  ext="${ext,,}"
+  [[ "$ext" == "mp4" ]] || return 1
+  kill_mpvpaper_for_target "$out"
+  start_mpvpaper_detached "$out" "$img"
+}
+
 apply_with_swww() {
-  local img="$1" outputs_csv
+  local img="$1" outputs_csv out other_img other_out saved_backend is_target
+  local reapply_hypr=0
+  local -a reapply_hypr_entries=()
 
   # hyprpaper can sit on top of swww, and mpvpaper can sit on top of both.
   # Release competing backends for the target outputs before applying.
   resolve_target_outputs
   if (( ${#TARGET_OUTPUTS[@]} == 0 )); then msg "No outputs detected"; return 1; fi
 
-  kill_hyprpaper_if_running
+  if is_hyprpaper_running; then
+    if [[ "$DISPLAY_TARGET" == "All displays" ]]; then
+      kill_hyprpaper_if_running
+    else
+      backend_state_read
+      for out in "${TARGET_OUTPUTS[@]}"; do
+        if [[ "$(backend_state_output_backend_for "$out" 2>/dev/null || true)" == "hyprpaper" ]]; then
+          reapply_hypr=1
+          break
+        fi
+      done
+      if (( reapply_hypr == 1 )); then
+        for other_out in "${!BACKEND_STATE_MAP[@]}"; do
+          is_target=0
+          for out in "${TARGET_OUTPUTS[@]}"; do
+            if [[ "$other_out" == "$out" ]]; then
+              is_target=1
+              break
+            fi
+          done
+          (( is_target == 1 )) && continue
+          saved_backend="$(backend_state_output_backend_for "$other_out" 2>/dev/null || true)"
+          [[ "$saved_backend" == "hyprpaper" ]] || continue
+          other_img="${BACKEND_STATE_MAP[$other_out]:-}"
+          [[ -n "$other_img" && -f "$other_img" ]] || continue
+          reapply_hypr_entries+=("${other_out}"$'\t'"${other_img}")
+        done
+      fi
+      kill_hyprpaper_if_running
+    fi
+  fi
   release_mpvpaper_for_targets
 
   ensure_swww_daemon || return 1
 
   outputs_csv="$(IFS=,; printf '%s' "${TARGET_OUTPUTS[*]}")"
-  if run_quiet_hup_safe swww img       --outputs "$outputs_csv"       --resize "$SWWW_RESIZE"       --transition-type "$SWWW_TRANSITION_TYPE"       --transition-duration "$SWWW_TRANSITION_DURATION"       --transition-fps "$SWWW_TRANSITION_FPS"       --filter "$SWWW_FILTER"       -- "$img"; then
+  if run_quiet_hup_safe "$SWWW_CMD" img \
+      --outputs "$outputs_csv" \
+      --resize "$SWWW_RESIZE" \
+      --transition-type "$SWWW_TRANSITION_TYPE" \
+      --transition-duration "$SWWW_TRANSITION_DURATION" \
+      --transition-fps "$SWWW_TRANSITION_FPS" \
+      --filter "$SWWW_FILTER" \
+      -- "$img"; then
     backend_state_set_outputs "swww" "$img" "${TARGET_OUTPUTS[@]}" || true
-    msg "Applied via swww -> $(basename -- "$img")"
+
+    if (( reapply_hypr == 1 && ${#reapply_hypr_entries[@]} > 0 )); then
+      backend_state_read
+      for out in "${TARGET_OUTPUTS[@]}"; do
+        BACKEND_STATE_MAP["$out"]="$img"
+        BACKEND_STATE_OUTPUT_BACKEND_MAP["$out"]="swww"
+      done
+
+      for other_img in "${reapply_hypr_entries[@]}"; do
+        other_out="${other_img%%$'\t'*}"
+        other_img="${other_img#*$'\t'}"
+        hyprpaper_apply_output "$other_out" "$other_img" || true
+        BACKEND_STATE_MAP["$other_out"]="$other_img"
+        BACKEND_STATE_OUTPUT_BACKEND_MAP["$other_out"]="hyprpaper"
+      done
+      backend_state_write "swww" || true
+    fi
+
+    msg "Applied via $(backend_label) -> $(basename -- "$img")"
     return 0
   fi
-  msg "swww apply failed"
+  msg "$(backend_label) apply failed"
   return 1
 }
-
 apply_with_hyprpaper() {
   local img="$1" out arg ext t
 
@@ -1645,6 +1857,278 @@ resume_focus_last_applied() {
   fi
 
   return 1
+}
+
+restore_apply_swww_map() {
+  local out img restored=0 skipped=0
+
+  backend_state_read
+  (( ${#BACKEND_STATE_MAP[@]} > 0 )) || return 1
+
+  kill_hyprpaper_if_running || true
+  kill_mpvpaper_if_running || true
+  ensure_swww_daemon || return 1
+
+  for out in "${!BACKEND_STATE_MAP[@]}"; do
+    img="${BACKEND_STATE_MAP[$out]}"
+    if [[ -z "$img" || ! -f "$img" ]]; then
+      (( skipped++ ))
+      continue
+    fi
+    if run_quiet_hup_safe "$SWWW_CMD" img       --outputs "$out"       --resize "$SWWW_RESIZE"       --transition-type "$SWWW_TRANSITION_TYPE"       --transition-duration "$SWWW_TRANSITION_DURATION"       --transition-fps "$SWWW_TRANSITION_FPS"       --filter "$SWWW_FILTER"       -- "$img"; then
+      (( restored++ ))
+    else
+      (( skipped++ ))
+    fi
+  done
+
+  (( restored > 0 )) || return 1
+  backend_state_set_backend_only "swww" || true
+  printf 'awtwall: restored %s wallpaper(s) via %s
+' "$restored" "$(backend_label)"
+  (( skipped > 0 )) && printf 'awtwall: skipped %s saved wallpaper(s)
+' "$skipped" >&2
+  return 0
+}
+
+restore_apply_hyprpaper_map() {
+  local out img arg ext try ok restored=0 skipped=0
+  local t max_tries ctl_t t_fast
+
+  backend_state_read
+  (( ${#BACKEND_STATE_MAP[@]} > 0 )) || return 1
+
+  kill_mpvpaper_if_running || true
+  ensure_hyprpaper_running || return 1
+
+  t="${HYPERPAPER_TIMEOUT:-3}"
+  t_fast="${HYPERPAPER_STARTUP_TIMEOUT:-0.4}"
+  max_tries=1
+  if (( HYPERPAPER_JUST_STARTED == 1 )); then
+    max_tries=8
+  fi
+
+  for out in "${!BACKEND_STATE_MAP[@]}"; do
+    img="${BACKEND_STATE_MAP[$out]}"
+    if [[ -z "$img" || ! -f "$img" ]]; then
+      (( skipped++ ))
+      continue
+    fi
+
+    ext="${img##*.}"
+    ext="${ext,,}"
+    if [[ "$ext" == "gif" || "$ext" == "mp4" ]]; then
+      (( skipped++ ))
+      continue
+    fi
+
+    ok=0
+    try=0
+    while (( try < max_tries )); do
+      ctl_t="$t"
+      if (( HYPERPAPER_JUST_STARTED == 1 && try < max_tries - 1 )); then
+        ctl_t="$t_fast"
+      fi
+      arg="${out}, ${img}, ${HYPERPAPER_MODE}"
+      if hyprpaper_ctl "$ctl_t" wallpaper "$arg"; then
+        ok=1
+        break
+      fi
+      arg="${out}, ${img}"
+      if hyprpaper_ctl "$ctl_t" wallpaper "$arg"; then
+        ok=1
+        break
+      fi
+      (( try++ ))
+      sleep 0.1
+    done
+
+    if (( ok == 1 )); then
+      (( restored++ ))
+    else
+      (( skipped++ ))
+    fi
+  done
+
+  HYPERPAPER_JUST_STARTED=0
+  (( restored > 0 )) || return 1
+  backend_state_set_backend_only "hyprpaper" || true
+  printf 'awtwall: restored %s wallpaper(s) via hyprpaper
+' "$restored"
+  (( skipped > 0 )) && printf 'awtwall: skipped %s saved wallpaper(s)
+' "$skipped" >&2
+  return 0
+}
+
+restore_apply_mpvpaper_map() {
+  local out img ext restored=0 skipped=0
+
+  backend_state_read
+  (( ${#BACKEND_STATE_MAP[@]} > 0 )) || return 1
+
+  for out in "${!BACKEND_STATE_MAP[@]}"; do
+    img="${BACKEND_STATE_MAP[$out]}"
+    if [[ -z "$img" || ! -f "$img" ]]; then
+      (( skipped++ ))
+      continue
+    fi
+
+    ext="${img##*.}"
+    ext="${ext,,}"
+    if [[ "$ext" != "mp4" ]]; then
+      (( skipped++ ))
+      continue
+    fi
+
+    kill_mpvpaper_for_target "$out"
+    if start_mpvpaper_detached "$out" "$img"; then
+      (( restored++ ))
+    else
+      (( skipped++ ))
+    fi
+  done
+
+  (( restored > 0 )) || return 1
+  backend_state_set_backend_only "mpvpaper" || true
+  printf 'awtwall: restored %s wallpaper(s) via mpvpaper
+' "$restored"
+  (( skipped > 0 )) && printf 'awtwall: skipped %s saved wallpaper(s)
+' "$skipped" >&2
+  return 0
+}
+
+restore_apply_saved_map() {
+  local out img saved_backend ext entry restored=0 skipped=0
+  local -a swww_entries=() hypr_entries=() mpv_entries=()
+
+  backend_state_read
+  (( ${#BACKEND_STATE_MAP[@]} > 0 )) || return 1
+
+  for out in "${!BACKEND_STATE_MAP[@]}"; do
+    img="${BACKEND_STATE_MAP[$out]}"
+    if [[ -z "$img" || ! -f "$img" ]]; then
+      (( skipped++ ))
+      continue
+    fi
+
+    saved_backend="$(backend_state_output_backend_for "$out" 2>/dev/null || true)"
+    ext="${img##*.}"
+    ext="${ext,,}"
+
+    case "$saved_backend" in
+      swww)
+        [[ "$ext" == "mp4" ]] && { (( skipped++ )); continue; }
+        swww_entries+=("${out}"$'\t'"${img}")
+        ;;
+      hyprpaper)
+        [[ "$ext" == "gif" || "$ext" == "mp4" ]] && { (( skipped++ )); continue; }
+        hypr_entries+=("${out}"$'\t'"${img}")
+        ;;
+      mpvpaper)
+        [[ "$ext" != "mp4" ]] && { (( skipped++ )); continue; }
+        mpv_entries+=("${out}"$'\t'"${img}")
+        ;;
+      *)
+        if [[ "$ext" == "mp4" ]]; then
+          mpv_entries+=("${out}"$'\t'"${img}")
+        else
+          swww_entries+=("${out}"$'\t'"${img}")
+        fi
+        ;;
+    esac
+  done
+
+  if (( ${#swww_entries[@]} > 0 )); then
+    kill_hyprpaper_if_running || true
+    ensure_swww_daemon || true
+    for entry in "${swww_entries[@]}"; do
+      out="${entry%%$'\t'*}"
+      img="${entry#*$'\t'}"
+      kill_mpvpaper_for_target "$out" || true
+      if swww_apply_output "$out" "$img"; then
+        (( restored++ ))
+      else
+        (( skipped++ ))
+      fi
+    done
+  fi
+
+  if (( ${#hypr_entries[@]} > 0 )); then
+    ensure_hyprpaper_running || true
+    for entry in "${hypr_entries[@]}"; do
+      out="${entry%%$'\t'*}"
+      img="${entry#*$'\t'}"
+      kill_mpvpaper_for_target "$out" || true
+      if hyprpaper_apply_output "$out" "$img"; then
+        (( restored++ ))
+      else
+        (( skipped++ ))
+      fi
+    done
+  fi
+
+  for entry in "${mpv_entries[@]}"; do
+    out="${entry%%$'\t'*}"
+    img="${entry#*$'\t'}"
+    if mpvpaper_apply_output "$out" "$img"; then
+      (( restored++ ))
+    else
+      (( skipped++ ))
+    fi
+  done
+
+  (( restored > 0 )) || return 1
+  printf 'awtwall: restored %s wallpaper(s)\n' "$restored"
+  (( skipped > 0 )) && printf 'awtwall: skipped %s saved wallpaper(s)\n' "$skipped" >&2
+  return 0
+}
+
+restore_last_applied_fallback() {
+  local img ext
+
+  img="${LAST_APPLIED:-}"
+  [[ -n "$img" && -f "$img" ]] || return 1
+
+  refresh_display_choices
+  resolve_target_outputs
+  (( ${#TARGET_OUTPUTS[@]} > 0 )) || return 1
+
+  ext="${img##*.}"
+  ext="${ext,,}"
+
+  if [[ "$ext" == "mp4" ]]; then
+    BACKEND="mpvpaper"
+    apply_with_mpvpaper "$img" || return 1
+  else
+    case "$BACKEND" in
+      swww|hyprpaper)
+        apply_still_image "$img" || return 1
+        ;;
+      mpvpaper|"")
+        BACKEND="hyprpaper"
+        apply_still_image "$img" || return 1
+        ;;
+      *)
+        BACKEND="hyprpaper"
+        apply_still_image "$img" || return 1
+        ;;
+    esac
+  fi
+
+  printf 'awtwall: restored last applied wallpaper
+'
+  return 0
+}
+
+restore_saved_wallpapers() {
+  backend_state_read
+
+  if (( ${#BACKEND_STATE_MAP[@]} > 0 )); then
+    restore_apply_saved_map && return 0
+  fi
+
+  restore_last_applied_fallback && return 0
+  die "No restorable wallpaper state found."
 }
 
 # ---------- persistence ----------
@@ -2595,7 +3079,7 @@ random_apply() {
 
 open_dir() {
   if have xdg-open; then
-    (nohup xdg-open "$WALL_DIR" >/dev/null 2>&1 &) || true
+    spawn_detached xdg-open "$WALL_DIR"
     msg "Opened directory"
   else
     msg "xdg-open not found"
@@ -2722,6 +3206,7 @@ Options:
   -h, --help              Show help
   -v, --version           Print version and check latest release
   --resume                Start at last saved selection
+  --restore               Reapply saved wallpapers and exit
   --start-at N            Start at selection index N (1-based)
 
 USAGEEOF
@@ -2781,6 +3266,10 @@ parse_args() {
         RESUME_LAST=1
         shift
         ;;
+      --restore)
+        RESTORE_ONLY=1
+        shift
+        ;;
       --start-at)
         [[ $# -ge 2 ]] || die "Missing value for $1"
         [[ "$2" =~ ^[0-9]+$ ]] || die "--start-at expects an integer (1-based)"
@@ -2808,6 +3297,11 @@ main() {
   parse_args "$@"
 
   [[ "$BACKEND" == "swww" || "$BACKEND" == "hyprpaper" || "$BACKEND" == "mpvpaper" ]] || BACKEND="hyprpaper"
+
+  if (( RESTORE_ONLY == 1 )); then
+    restore_saved_wallpapers
+    exit 0
+  fi
 
   # Start position policy (default: start at 1st item)
   if [[ -n "${START_AT}" ]]; then
