@@ -27,7 +27,7 @@ APP_NAME="awtwall"
 APP_ID="awtwall"
 
 # AWTWALL_VERSION_BLOCK_BEGIN
-AWTWALL_VERSION="${AWTWALL_VERSION:-v1.7}"  # bump for releases
+AWTWALL_VERSION="${AWTWALL_VERSION:-v1.8}"  # bump for releases
 AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
@@ -334,6 +334,45 @@ have_pacman_pkg() {
   have pacman && pacman -Qq "$1" >/dev/null 2>&1
 }
 
+command_realpath() {
+  local path="$1"
+  [[ -n "$path" ]] || return 1
+  readlink -f -- "$path" 2>/dev/null || printf '%s' "$path"
+}
+
+command_path_looks_like_awww() {
+  local cmd="$1" path real
+  path="$(command -v "$cmd" 2>/dev/null || true)"
+  [[ -n "$path" ]] || return 1
+  real="$(command_realpath "$path")"
+  [[ "$path" == */awww || "$path" == */awww-daemon || "$real" == */awww || "$real" == */awww-daemon ]]
+}
+
+pacman_cmd_owner_is_awww() {
+  local cmd="$1" path owner
+  have pacman || return 1
+  path="$(command -v "$cmd" 2>/dev/null || true)"
+  [[ -n "$path" ]] || return 1
+  owner="$(pacman -Qqo "$path" 2>/dev/null || true)"
+  case "$owner" in
+    awww|awww-bin|awww-git) return 0 ;;
+  esac
+  return 1
+}
+
+swww_pair_is_awww() {
+  command_path_looks_like_awww swww && return 0
+  command_path_looks_like_awww swww-daemon && return 0
+  pacman_cmd_owner_is_awww swww && return 0
+  pacman_cmd_owner_is_awww swww-daemon && return 0
+  have awww && return 0
+  have awww-daemon && return 0
+  have_pacman_pkg awww-bin && return 0
+  have_pacman_pkg awww-git && return 0
+  have_pacman_pkg awww && return 0
+  return 1
+}
+
 detect_swww_provider() {
   if (( SWWW_DETECT_DONE == 1 )); then
     [[ -n "$SWWW_CMD" && -n "$SWWW_DAEMON_CMD" ]]
@@ -347,12 +386,13 @@ detect_swww_provider() {
   SWWW_BACKEND_READY=0
 
   # Prefer the swww-compatible interface when it exists.
-  # Some awww packages ship compatible swww/swww-daemon binaries, and that path
-  # is more reliable than native awww commands for persistent wallpaper state.
+  # Some awww packages install or symlink swww/swww-daemon for compatibility,
+  # so detect the provider from the command path or owning package instead of
+  # relying only on package names being directly installed.
   if have swww && have swww-daemon; then
     SWWW_CMD="swww"
     SWWW_DAEMON_CMD="swww-daemon"
-    if have_pacman_pkg awww-bin || have_pacman_pkg awww-git || have_pacman_pkg awww; then
+    if swww_pair_is_awww; then
       SWWW_PROVIDER="awww"
     else
       SWWW_PROVIDER="swww"
@@ -404,16 +444,19 @@ spawn_detached() {
   (( $# > 0 )) || return 1
 
   if have setsid; then
-    ( setsid "$@" </dev/null >/dev/null 2>&1 & ) || true
+    setsid "$@" </dev/null >/dev/null 2>&1 &
+    disown "$!" 2>/dev/null || true
     return 0
   fi
 
   if have nohup; then
-    ( nohup "$@" </dev/null >/dev/null 2>&1 & ) || true
+    nohup "$@" </dev/null >/dev/null 2>&1 &
+    disown "$!" 2>/dev/null || true
     return 0
   fi
 
-  ( "$@" </dev/null >/dev/null 2>&1 & ) || true
+  "$@" </dev/null >/dev/null 2>&1 &
+  disown "$!" 2>/dev/null || true
   return 0
 }
 
