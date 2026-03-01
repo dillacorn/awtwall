@@ -1,7 +1,5 @@
 # awtwall
 
-> **Disclaimer:** awtwall is still experimental. Some bugs may still be present while I continue testing different backends and scenarios for future fixes.
-
 awtwall is a fast TUI wallpaper picker for Wayland with image previews, saved settings, and keyboard-first controls.
 
 It supports still images, GIFs, and MP4 wallpapers through `swww` / `awww`, `hyprpaper`, or `mpvpaper`.
