@@ -143,11 +143,13 @@ awtwall supports these preview methods:
 
 Best for still-image wallpapers with transition support.
 
-awtwall uses `swww` when available and falls back to `awww` when needed.
+awtwall prioritizes `awww` over `swww` when both are installed.
+
+If either `awww` or `swww` is available, awtwall prefers them over `hyprpaper` for still images.
 
 ### `hyprpaper`
 
-Best for still-image wallpapers if you prefer Hyprland's wallpaper daemon behavior.
+Still-image backend fallback when `awww` / `swww` is not being used.
 
 ### `mpvpaper`
 
