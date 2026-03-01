@@ -27,7 +27,7 @@ APP_NAME="awtwall"
 APP_ID="awtwall"
 
 # AWTWALL_VERSION_BLOCK_BEGIN
-AWTWALL_VERSION="${AWTWALL_VERSION:-v1.8}"  # bump for releases
+AWTWALL_VERSION="${AWTWALL_VERSION:-v1.9}"  # bump for releases
 AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
@@ -256,6 +256,7 @@ LAST_APPLIED=""            # persisted last applied wallpaper path
 LAST_APPLY_BACKEND_LABEL=""  # runtime only
 RANDOM_ACTION=""            # "" | current | all-same | all-different
 RANDOM_ALLOW_MPV=1          # 1=allow mpvpaper for random CLI actions
+FILTER_KIND_WAS_SET_BY_ARG=0  # 1 when --type was explicitly passed on the CLI
 
 
 GRID_COLS=1
@@ -1963,7 +1964,7 @@ apply_with_mpvpaper() {
 }
 
 apply_still_image() {
-  local img="$1"
+  local img="$1" fallback_backend
 
   case "$BACKEND" in
     swww)
@@ -1980,15 +1981,17 @@ apply_still_image() {
       return $?
       ;;
     mpvpaper|"")
-      msg "Still image selected, using hyprpaper"
-      BACKEND="hyprpaper"
-      apply_with_hyprpaper "$img"
+      fallback_backend="$(default_still_backend)"
+      msg "Still image selected, using ${fallback_backend}"
+      BACKEND="$fallback_backend"
+      apply_still_image "$img"
       return $?
       ;;
     *)
-      msg "Invalid backend '$BACKEND', using hyprpaper"
-      BACKEND="hyprpaper"
-      apply_with_hyprpaper "$img"
+      fallback_backend="$(default_still_backend)"
+      msg "Invalid backend '$BACKEND', using ${fallback_backend}"
+      BACKEND="$fallback_backend"
+      apply_still_image "$img"
       return $?
       ;;
   esac
@@ -2064,11 +2067,17 @@ random_pick_one() {
 }
 
 random_apply_noninteractive() {
-  local original_display_target="$DISPLAY_TARGET"
+  local original_display_target="$DISPLAY_TARGET" original_filter_kind="$FILTER_KIND" random_filter_kind="$FILTER_KIND"
   local img out applied=0 reused=0 tmp i j
   local -a pool=()
 
+  if (( FILTER_KIND_WAS_SET_BY_ARG == 0 )); then
+    random_filter_kind="ALL"
+  fi
+
+  FILTER_KIND="$random_filter_kind"
   scan_wallpapers || true
+  FILTER_KIND="$original_filter_kind"
   if ! random_collect_candidates; then
     if (( RANDOM_ALLOW_MPV == 0 )); then
       die "No eligible non-mp4 wallpapers found."
@@ -2395,7 +2404,7 @@ restore_apply_saved_map() {
 }
 
 restore_last_applied_fallback() {
-  local img ext
+  local img ext fallback_backend
 
   img="${LAST_APPLIED:-}"
   [[ -n "$img" && -f "$img" ]] || return 1
@@ -2416,11 +2425,13 @@ restore_last_applied_fallback() {
         apply_still_image "$img" || return 1
         ;;
       mpvpaper|"")
-        BACKEND="hyprpaper"
+        fallback_backend="$(default_still_backend)"
+        BACKEND="$fallback_backend"
         apply_still_image "$img" || return 1
         ;;
       *)
-        BACKEND="hyprpaper"
+        fallback_backend="$(default_still_backend)"
+        BACKEND="$fallback_backend"
         apply_still_image "$img" || return 1
         ;;
     esac
@@ -2465,6 +2476,8 @@ save_state() {
 }
 
 load_state() {
+  local normalized_backend
+
   if [[ -f "$STATE_FILE" ]]; then
     # shellcheck disable=SC1090
     source "$STATE_FILE" || true
@@ -2472,7 +2485,11 @@ load_state() {
 
   [[ -d "$WALL_DIR" ]] || WALL_DIR="$DEFAULT_WALL_DIR"
   [[ "$RECURSIVE" =~ ^[01]$ ]] || RECURSIVE=1
-  [[ "$BACKEND" == "swww" || "$BACKEND" == "hyprpaper" || "$BACKEND" == "mpvpaper" ]] || BACKEND="hyprpaper"
+  if normalized_backend="$(normalize_backend_name "${BACKEND:-}" 2>/dev/null)"; then
+    BACKEND="$normalized_backend"
+  else
+    BACKEND="$(default_still_backend)"
+  fi
   [[ "$FILTER_KIND" == "ALL" || "$FILTER_KIND" == "IMAGES" || "$FILTER_KIND" == "GIF" || "$FILTER_KIND" == "MP4" ]] || FILTER_KIND="ALL"
 
   # QoL: never restore previous filter on startup
@@ -3564,6 +3581,7 @@ parse_args() {
           mp4|video|videos) FILTER_KIND="MP4" ;;
           *) die "Invalid --type: $2 (use: all | images | gif | mp4)" ;;
         esac
+        FILTER_KIND_WAS_SET_BY_ARG=1
         shift 2
         ;;
       --random|--random-current)
