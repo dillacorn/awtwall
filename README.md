@@ -117,6 +117,14 @@ awtwall --force-encoder img2sixel
 awtwall --no-sixel
 awtwall --alt-screen
 awtwall --restore
+awtwall --random
+awtwall --random-current
+awtwall --random-all
+awtwall --random-all-different
+awtwall --random --no-mpvpaper
+awtwall --random-current --no-mpvpaper
+awtwall --random-all --no-mpvpaper
+awtwall --random-all-different --no-mpvpaper
 ```
 
 ## Preview backends

@@ -27,7 +27,7 @@ APP_NAME="awtwall"
 APP_ID="awtwall"
 
 # AWTWALL_VERSION_BLOCK_BEGIN
-AWTWALL_VERSION="${AWTWALL_VERSION:-v1.6}"  # bump for releases
+AWTWALL_VERSION="${AWTWALL_VERSION:-v1.7}"  # bump for releases
 AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
@@ -253,6 +253,9 @@ START_AT=""                 # --start-at N (1-based)
 LAST_SEL=0                  # persisted selection index
 LAST_FOCUS=""              # persisted last focused wallpaper path
 LAST_APPLIED=""            # persisted last applied wallpaper path
+LAST_APPLY_BACKEND_LABEL=""  # runtime only
+RANDOM_ACTION=""            # "" | current | all-same | all-different
+RANDOM_ALLOW_MPV=1          # 1=allow mpvpaper for random CLI actions
 
 
 GRID_COLS=1
@@ -275,6 +278,7 @@ LAST_GRID_COLS=0
 LAST_GRID_ROWS=0
 
 declare -A HASH_CACHE=()
+declare -a RANDOM_CANDIDATES=()
 
 BACKEND_STATE_BACKEND=""
 declare -A BACKEND_STATE_MAP=()
@@ -1223,6 +1227,47 @@ check_runtime_requirements() {
   return 0
 }
 
+check_noninteractive_requirements() {
+  local missing=0 c item
+  local -a core_cmds=(find sort sed grep awk basename dirname)
+  local -a missing_cmds=()
+
+  for c in "${core_cmds[@]}"; do
+    if ! have "$c"; then
+      missing_cmds+=("$c")
+      missing=1
+    fi
+  done
+
+  if ! ensure_backend_available; then
+    missing_cmds+=("install at least one wallpaper backend:")
+    missing_cmds+=("awww-bin or awww-git (preferred), or swww")
+    missing_cmds+=("hyprpaper + hyprctl (package: hyprland)")
+    missing_cmds+=("mpvpaper")
+    missing=1
+  fi
+
+  if [[ "$RANDOM_ACTION" == "current" ]] && ! have hyprctl; then
+    missing_cmds+=("hyprctl (needed to detect the focused monitor)")
+    missing=1
+  fi
+
+  if (( RANDOM_ALLOW_MPV == 0 )); then
+    if ! backend_is_available swww && ! backend_is_available hyprpaper; then
+      missing_cmds+=("awww-bin or awww-git (preferred), or swww, or hyprpaper + hyprctl")
+      missing=1
+    fi
+  fi
+
+  if (( missing )); then
+    echo "awtwall cannot run the requested non-interactive action. Missing requirements:" >&2
+    for item in "${missing_cmds[@]}"; do echo "  - $item" >&2; done
+    return 1
+  fi
+
+  return 0
+}
+
 generate_video_thumb_png() {
   local src="$1" dst="$2" frame tmp
   frame="${dst}.frame.$$".png
@@ -1508,6 +1553,28 @@ refresh_display_choices() {
   else
     DISPLAY_TARGET="All displays"
   fi
+}
+
+focused_output_name() {
+  local out=""
+
+  if have hyprctl && have jq; then
+    out="$(hyprctl -j monitors 2>/dev/null | jq -r '.[] | select(.focused==true) | .name' | head -n1 || true)"
+    if [[ -n "$out" && "$out" != "null" ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+  fi
+
+  if have hyprctl; then
+    out="$(hyprctl activeworkspace 2>/dev/null | sed -n 's/.* on monitor \([^:]*\):.*/\1/p' | head -n1 || true)"
+    if [[ -n "$out" ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+  fi
+
+  return 1
 }
 
 resolve_target_outputs() {
@@ -1884,22 +1951,27 @@ apply_still_image() {
   esac
 }
 
-apply_selected() {
-  local img rc ext
-  if (( ${#FILES[@]} == 0 )); then msg "No wallpapers to apply"; return 1; fi
+apply_path() {
+  local img="$1" rc=1 ext
+  [[ -n "$img" ]] || return 1
 
   update_focus_state || true
-  img="${FILES[$SEL]}"
   ext="${img##*.}"
   ext="${ext,,}"
+  LAST_APPLY_BACKEND_LABEL=""
 
-  rc=1
   if [[ "$ext" == "mp4" ]]; then
     apply_with_mpvpaper "$img"
     rc=$?
+    if (( rc == 0 )); then
+      LAST_APPLY_BACKEND_LABEL="mpvpaper"
+    fi
   else
     apply_still_image "$img"
     rc=$?
+    if (( rc == 0 )); then
+      LAST_APPLY_BACKEND_LABEL="$(backend_label)"
+    fi
   fi
 
   if (( rc == 0 )); then
@@ -1911,6 +1983,121 @@ apply_selected() {
   return "$rc"
 }
 
+apply_selected() {
+  local img
+  if (( ${#FILES[@]} == 0 )); then msg "No wallpapers to apply"; return 1; fi
+  img="${FILES[$SEL]}"
+  apply_path "$img"
+}
+
+random_collect_candidates() {
+  local p ext have_still=0 have_video=0
+  RANDOM_CANDIDATES=()
+
+  if backend_is_available swww || backend_is_available hyprpaper; then
+    have_still=1
+  fi
+  if (( RANDOM_ALLOW_MPV == 1 )) && backend_is_available mpvpaper; then
+    have_video=1
+  fi
+
+  for p in "${FILES[@]}"; do
+    ext="${p##*.}"
+    ext="${ext,,}"
+    if [[ "$ext" == "mp4" ]]; then
+      (( have_video == 1 )) || continue
+    else
+      (( have_still == 1 )) || continue
+    fi
+    RANDOM_CANDIDATES+=("$p")
+  done
+
+  (( ${#RANDOM_CANDIDATES[@]} > 0 ))
+}
+
+random_pick_one() {
+  (( ${#RANDOM_CANDIDATES[@]} > 0 )) || return 1
+  printf '%s\n' "${RANDOM_CANDIDATES[RANDOM % ${#RANDOM_CANDIDATES[@]}]}"
+}
+
+random_apply_noninteractive() {
+  local original_display_target="$DISPLAY_TARGET"
+  local img out applied=0 reused=0 tmp i j
+  local -a pool=()
+
+  scan_wallpapers || true
+  if ! random_collect_candidates; then
+    if (( RANDOM_ALLOW_MPV == 0 )); then
+      die "No eligible non-mp4 wallpapers found."
+    fi
+    die "No eligible wallpapers found."
+  fi
+
+  case "$RANDOM_ACTION" in
+    current)
+      DISPLAY_TARGET="$(focused_output_name)" || die "Could not determine the focused monitor."
+      out="$DISPLAY_TARGET"
+      img="$(random_pick_one)" || die "Could not choose a random wallpaper."
+      apply_path "$img" || die "Random wallpaper apply failed for ${DISPLAY_TARGET}."
+      DISPLAY_TARGET="$out"
+      ;;
+    all-same)
+      DISPLAY_TARGET="All displays"
+      img="$(random_pick_one)" || die "Could not choose a random wallpaper."
+      apply_path "$img" || die "Random wallpaper apply failed for all displays."
+      ;;
+    all-different)
+      refresh_display_choices
+      DISPLAY_TARGET="All displays"
+      resolve_target_outputs
+      (( ${#TARGET_OUTPUTS[@]} > 0 )) || die "No outputs detected."
+
+      pool=("${RANDOM_CANDIDATES[@]}")
+      for (( i=${#pool[@]}-1; i>0; i-- )); do
+        j=$(( RANDOM % (i + 1) ))
+        tmp="${pool[i]}"
+        pool[i]="${pool[j]}"
+        pool[j]="$tmp"
+      done
+
+      for out in "${TARGET_OUTPUTS[@]}"; do
+        if (( ${#pool[@]} > 0 )); then
+          img="${pool[0]}"
+          pool=("${pool[@]:1}")
+        else
+          img="$(random_pick_one)" || die "Could not choose a random wallpaper."
+          reused=1
+        fi
+
+        DISPLAY_TARGET="$out"
+        apply_path "$img" || die "Random wallpaper apply failed for ${out}."
+        (( applied += 1 ))
+      done
+      ;;
+    *)
+      die "Invalid random action: ${RANDOM_ACTION}"
+      ;;
+  esac
+
+  DISPLAY_TARGET="$original_display_target"
+  save_state || true
+
+  case "$RANDOM_ACTION" in
+    current)
+      printf 'awtwall: random wallpaper applied to %s via %s\n' "$out" "${LAST_APPLY_BACKEND_LABEL:-$BACKEND}"
+      ;;
+    all-same)
+      printf 'awtwall: random wallpaper applied to all displays via %s\n' "${LAST_APPLY_BACKEND_LABEL:-$BACKEND}"
+      ;;
+    all-different)
+      if (( reused == 1 )); then
+        printf 'awtwall: randomized %s display(s); duplicates were needed because eligible wallpapers were fewer than outputs\n' "$applied"
+      else
+        printf 'awtwall: randomized %s display(s) with different wallpapers\n' "$applied"
+      fi
+      ;;
+  esac
+}
 
 resume_focus_last_applied() {
   local target base i match=-1 hits=0
@@ -3282,6 +3469,11 @@ Options:
   -b, --backend NAME      swww | hyprpaper | mpvpaper
   -o, --output NAME       Target display name or "All displays"
   --type NAME             all | images | gif | mp4
+  --random                Randomize the focused display
+  --random-current        Randomize the focused display
+  --random-all            Apply one random wallpaper to all displays
+  --random-all-different  Apply different random wallpapers to all displays
+  --no-mpvpaper           Random CLI actions skip .mp4 files
   --no-sixel              Disable image previews (UI only)
   --alt-screen            Use alternate screen buffer
   --force-encoder NAME    chafa | img2sixel | magick | kitty
@@ -3330,6 +3522,22 @@ parse_args() {
           *) die "Invalid --type: $2 (use: all | images | gif | mp4)" ;;
         esac
         shift 2
+        ;;
+      --random|--random-current)
+        RANDOM_ACTION="current"
+        shift
+        ;;
+      --random-all)
+        RANDOM_ACTION="all-same"
+        shift
+        ;;
+      --random-all-different)
+        RANDOM_ACTION="all-different"
+        shift
+        ;;
+      --no-mpvpaper)
+        RANDOM_ALLOW_MPV=0
+        shift
         ;;
       --no-sixel)
         WALLPICKER_NO_SIXEL=1
@@ -3382,6 +3590,12 @@ main() {
 
   if (( RESTORE_ONLY == 1 )); then
     restore_saved_wallpapers
+    exit 0
+  fi
+
+  if [[ -n "$RANDOM_ACTION" ]]; then
+    check_noninteractive_requirements || exit 1
+    random_apply_noninteractive
     exit 0
   fi
 
