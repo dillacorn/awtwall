@@ -13,6 +13,7 @@ IFS=$'\n\t'
 # - R = refresh (rescans and clears active find filter)
 # - d = cycle swww transition duration
 # - p = cycle swww transition fps
+# - E = configure optional post-exec hook
 # - count line renamed to total/shown
 # - startup never restores previous find filter
 
@@ -27,7 +28,7 @@ APP_NAME="awtwall"
 APP_ID="awtwall"
 
 # AWTWALL_VERSION_BLOCK_BEGIN
-AWTWALL_VERSION="${AWTWALL_VERSION:-v1.9}"  # bump for releases
+AWTWALL_VERSION="${AWTWALL_VERSION:-v2.0}"  # bump for releases
 AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
@@ -254,6 +255,8 @@ LAST_SEL=0                  # persisted selection index
 LAST_FOCUS=""              # persisted last focused wallpaper path
 LAST_APPLIED=""            # persisted last applied wallpaper path
 LAST_APPLY_BACKEND_LABEL=""  # runtime only
+POST_EXEC_ENABLED=0          # persisted optional hook; 1=run POST_EXEC_CMD after successful apply
+POST_EXEC_CMD=""             # persisted command run by bash -lc with AWTWALL_* env vars
 RANDOM_ACTION=""            # "" | current | all-same | all-different
 RANDOM_ALLOW_MPV=1          # 1=allow mpvpaper for random CLI actions
 FILTER_KIND_WAS_SET_BY_ARG=0  # 1 when --type was explicitly passed on the CLI
@@ -288,6 +291,14 @@ declare -A BACKEND_STATE_OUTPUT_BACKEND_MAP=()
 # ---------- helpers ----------
 msg() { STATUS_MSG="$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+post_exec_label() {
+  if (( POST_EXEC_ENABLED == 1 )) && [[ -n "${POST_EXEC_CMD:-}" ]]; then
+    printf '%s' "on"
+  else
+    printf '%s' "off"
+  fi
+}
 
 normalize_backend_name() {
   local backend="${1:-}"
@@ -854,7 +865,9 @@ run_with_timeout() {
     if kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
       sleep 0.5
-      kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
     fi
   ) &
   killer=$!
@@ -1997,6 +2010,56 @@ apply_still_image() {
   esac
 }
 
+run_post_exec_hook() {
+  local img="$1" dir file backend_label outputs_csv old_status rc hook_log
+
+  (( POST_EXEC_ENABLED == 1 )) || return 0
+  [[ -n "${POST_EXEC_CMD:-}" ]] || return 0
+  [[ -n "$img" && -e "$img" ]] || return 0
+
+  dir="$(dirname -- "$img")"
+  file="$(basename -- "$img")"
+  backend_label="${LAST_APPLY_BACKEND_LABEL:-$BACKEND}"
+  outputs_csv=""
+  if (( ${#TARGET_OUTPUTS[@]} > 0 )); then
+    outputs_csv="$(IFS=,; printf '%s' "${TARGET_OUTPUTS[*]}")"
+  fi
+
+  old_status="$STATUS_MSG"
+  hook_log="$(mktemp "${TMPDIR:-/tmp}/awtwall-post-exec.XXXXXX")" || {
+    msg "${old_status} | post-exec log failed"
+    return 0
+  }
+
+  # stdout/stderr are logged instead of printed so the hook cannot corrupt the SIXEL TUI.
+  if AWTWALL_WALLPAPER="$img" \
+      AWTWALL_DIR="$dir" \
+      AWTWALL_FILE="$file" \
+      AWTWALL_BACKEND="$backend_label" \
+      AWTWALL_DISPLAY="$DISPLAY_TARGET" \
+      AWTWALL_OUTPUTS="$outputs_csv" \
+      bash -lc "$POST_EXEC_CMD" awtwall-post-exec "$img" "$dir" "$file" >"$hook_log" 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [[ -s "$hook_log" ]]; then
+    {
+      printf '\n[post-exec] %s\n' "$POST_EXEC_CMD"
+      cat -- "$hook_log"
+    } >>"$DEBUG_LOG"
+  fi
+  rm -f -- "$hook_log"
+
+  if (( rc == 0 )); then
+    msg "${old_status} | post-exec OK"
+  else
+    msg "${old_status} | post-exec failed rc=${rc}"
+  fi
+  return 0
+}
+
 apply_path() {
   local img="$1" rc=1 ext
   [[ -n "$img" ]] || return 1
@@ -2024,6 +2087,7 @@ apply_path() {
     LAST_APPLIED="$img"
     update_focus_state || true
     save_state || true
+    run_post_exec_hook "$img" || true
   fi
 
   return "$rc"
@@ -2471,6 +2535,8 @@ save_state() {
     printf 'LAST_SEL=%q\n' "${LAST_SEL:-0}"
     printf 'LAST_FOCUS=%q\n' "${LAST_FOCUS:-}"
     printf 'LAST_APPLIED=%q\n' "${LAST_APPLIED:-}"
+    printf 'POST_EXEC_ENABLED=%q\n' "${POST_EXEC_ENABLED:-0}"
+    printf 'POST_EXEC_CMD=%q\n' "${POST_EXEC_CMD:-}"
   } > "${STATE_FILE}.tmp.$$"
   mv -f -- "${STATE_FILE}.tmp.$$" "$STATE_FILE"
 }
@@ -2498,11 +2564,14 @@ load_state() {
   [[ "${LAST_SEL:-0}" =~ ^[0-9]+$ ]] || LAST_SEL=0
   : "${LAST_FOCUS:=}"
   : "${LAST_APPLIED:=}"
+  [[ "${POST_EXEC_ENABLED:-0}" =~ ^[01]$ ]] || POST_EXEC_ENABLED=0
+  : "${POST_EXEC_CMD:=}"
 
   # scrub broken older state that may have literal wrapping quotes
   HYPERPAPER_MODE="${HYPERPAPER_MODE%\"}"; HYPERPAPER_MODE="${HYPERPAPER_MODE#\"}"
   LAST_FOCUS="${LAST_FOCUS%\"}"; LAST_FOCUS="${LAST_FOCUS#\"}"
   LAST_APPLIED="${LAST_APPLIED%\"}"; LAST_APPLIED="${LAST_APPLIED#\"}"
+  POST_EXEC_CMD="${POST_EXEC_CMD%\"}"; POST_EXEC_CMD="${POST_EXEC_CMD#\"}"
 }
 
 # ---------- scan / filter ----------
@@ -2791,7 +2860,7 @@ draw_status_bars() {
   printf '%-*.*s' "$cols" "$cols"     " dir=$(short_path "$WALL_DIR" 60) recursive=${RECURSIVE} type=${FILTER_KIND} find='$(sanitize_text "$FILTER_QUERY")' "
 
   ui_goto 3 1; ui_clear_line; ui_dim
-  printf '%-*.*s' "$cols" "$cols"     " ${swww_name}: resize=${SWWW_RESIZE} trans=${SWWW_TRANSITION_TYPE} dur=${SWWW_TRANSITION_DURATION}s fps=${SWWW_TRANSITION_FPS} interp=${SWWW_FILTER} | hyprpaper: ${HYPERPAPER_MODE} | mpvpaper: mp4 "
+  printf '%-*.*s' "$cols" "$cols"     " ${swww_name}: resize=${SWWW_RESIZE} trans=${SWWW_TRANSITION_TYPE} dur=${SWWW_TRANSITION_DURATION}s fps=${SWWW_TRANSITION_FPS} interp=${SWWW_FILTER} | hyprpaper: ${HYPERPAPER_MODE} | mpvpaper: mp4 | post-exec: $(post_exec_label) "
   ui_color_reset
 
   status_tail="$(sanitize_text "$STATUS_MSG")"
@@ -2913,7 +2982,7 @@ draw_help() {
   ui_color_reset
 
   ui_goto "$row2" 1; ui_clear_line; ui_dim
-  printf '%-*.*s' "$cols" "$cols"     " q quit | v version | D dir | n recurse | e type | b backend | m display | z resize | t trans | d dur | p fps | i interp "
+  printf '%-*.*s' "$cols" "$cols"     " q quit | v version | D dir | n recurse | e type | b backend | m display | E post-exec | z resize | t trans | d dur | p fps | i interp "
   ui_color_reset
 }
 
@@ -3440,6 +3509,31 @@ purge_preview_cache() {
   NEED_FULL_REDRAW=1
 }
 
+do_post_exec_prompt() {
+  local v current
+
+  current="${POST_EXEC_CMD:-off}"
+  msg "Current post-exec: $(sanitize_text "$current")"
+  draw_status_bars
+
+  v="$(prompt_line "Post-exec command (empty disables): " "${POST_EXEC_CMD:-}")"
+
+  if [[ -z "$v" ]]; then
+    POST_EXEC_ENABLED=0
+    POST_EXEC_CMD=""
+    save_state
+    msg "Post-exec disabled"
+    NEED_FULL_REDRAW=1
+    return 0
+  fi
+
+  POST_EXEC_CMD="$v"
+  POST_EXEC_ENABLED=1
+  save_state
+  msg "Post-exec enabled"
+  NEED_FULL_REDRAW=1
+}
+
 do_dir_prompt() {
   local v
   v="$(prompt_line "Wallpaper directory: " "$WALL_DIR")"
@@ -3537,6 +3631,8 @@ Options:
   --no-sixel              Disable image previews (UI only)
   --alt-screen            Use alternate screen buffer
   --force-encoder NAME    chafa | img2sixel | magick | kitty
+  --post-exec CMD         Run CMD after each successful wallpaper apply
+  --no-post-exec          Disable the saved post-exec hook
   -h, --help              Show help
   -v, --version           Print version and check latest release
   --resume                Start at last saved selection
@@ -3612,6 +3708,17 @@ parse_args() {
         [[ $# -ge 2 ]] || die "Missing value for $1"
         WALLPICKER_FORCE_ENCODER="$2"
         shift 2
+        ;;
+      --post-exec)
+        [[ $# -ge 2 ]] || die "Missing value for $1"
+        POST_EXEC_CMD="$2"
+        POST_EXEC_ENABLED=1
+        shift 2
+        ;;
+      --no-post-exec)
+        POST_EXEC_CMD=""
+        POST_EXEC_ENABLED=0
+        shift
         ;;
       --resume)
         RESUME_LAST=1
@@ -3796,6 +3903,9 @@ main() {
       m)
         refresh_display_choices
         cycle_display
+        ;;
+      E)
+        do_post_exec_prompt
         ;;
       z)
         cycle_swww_resize
