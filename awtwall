@@ -30,7 +30,7 @@ APP_NAME="awtwall"
 APP_ID="awtwall"
 
 # AWTWALL_VERSION_BLOCK_BEGIN
-AWTWALL_VERSION="${AWTWALL_VERSION:-v2.1.1}"  # bump for releases
+AWTWALL_VERSION="${AWTWALL_VERSION:-v2.1.2}"  # bump for releases
 AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
@@ -268,7 +268,6 @@ DISPLAY_SOURCE=""
 DISPLAY_FOCUSED=""
 DISPLAY_LAYOUT_AVAILABLE=0
 
-OPTION_MENU_CONFIRMED=0
 OPTION_MENU_VALUE=""
 OPTION_MENU_TOP=0
 OPTION_MENU_LIST_START=0
@@ -3530,6 +3529,11 @@ draw_monitor_layout() {
   local sx sy ex ey box_width box_height row border label label_width
 
   OPTION_MENU_LAYOUT_BOTTOM=$(( start_row - 1 ))
+  OPTION_MENU_LAYOUT_HIT_INDEX=()
+  OPTION_MENU_LAYOUT_HIT_ROW_START=()
+  OPTION_MENU_LAYOUT_HIT_ROW_END=()
+  OPTION_MENU_LAYOUT_HIT_COL_START=()
+  OPTION_MENU_LAYOUT_HIT_COL_END=()
   (( DISPLAY_LAYOUT_AVAILABLE == 1 )) || return 1
 
   for i in "${!DISPLAY_CHOICES[@]}"; do
@@ -3590,6 +3594,12 @@ draw_monitor_layout() {
     box_height=$(( ey - sy + 1 ))
     (( box_width >= 5 && box_height >= 3 )) || continue
 
+    OPTION_MENU_LAYOUT_HIT_INDEX+=("$i")
+    OPTION_MENU_LAYOUT_HIT_ROW_START+=("$sy")
+    OPTION_MENU_LAYOUT_HIT_ROW_END+=("$ey")
+    OPTION_MENU_LAYOUT_HIT_COL_START+=("$sx")
+    OPTION_MENU_LAYOUT_HIT_COL_END+=("$ex")
+
     printf -v border '%*s' "$(( box_width - 2 ))" ''
     border="${border// /-}"
     ui_goto "$sy" "$sx"
@@ -3617,6 +3627,22 @@ draw_monitor_layout() {
   done
 
   return 0
+}
+
+option_menu_layout_index_at() {
+  local y="$1" x="$2" i count="${#OPTION_MENU_LAYOUT_HIT_INDEX[@]}"
+
+  for (( i = 0; i < count; i++ )); do
+    if (( y >= OPTION_MENU_LAYOUT_HIT_ROW_START[i] &&
+          y <= OPTION_MENU_LAYOUT_HIT_ROW_END[i] &&
+          x >= OPTION_MENU_LAYOUT_HIT_COL_START[i] &&
+          x <= OPTION_MENU_LAYOUT_HIT_COL_END[i] )); then
+      printf '%s\n' "${OPTION_MENU_LAYOUT_HIT_INDEX[$i]}"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 draw_option_menu() {
@@ -3723,7 +3749,6 @@ option_menu() {
   local redraw=1 new_cols new_lines
   local re=$'^\e\[<([0-9]+);([0-9]+);([0-9]+)([Mm])$'
 
-  OPTION_MENU_CONFIRMED=0
   OPTION_MENU_VALUE=""
   count=${#menu_values[@]}
   (( count > 0 )) || return 1
@@ -3779,12 +3804,22 @@ option_menu() {
       (( (code & 32) == 0 )) || continue
       btn=$(( code & 3 ))
       (( btn == 0 )) || continue
+
+      if (( show_layout == 1 )); then
+        idx="$(option_menu_layout_index_at "$y" "$x" || true)"
+        if [[ "$idx" =~ ^[0-9]+$ ]] && (( idx >= 0 && idx < count )); then
+          selected=$idx
+          OPTION_MENU_VALUE="${menu_values[$selected]}"
+          NEED_FULL_REDRAW=1
+          return 0
+        fi
+      fi
+
       if (( y >= OPTION_MENU_LIST_START && y <= OPTION_MENU_LIST_END && x >= 1 )); then
         idx=$(( OPTION_MENU_TOP + y - OPTION_MENU_LIST_START ))
         if (( idx >= 0 && idx < count )); then
           selected=$idx
           OPTION_MENU_VALUE="${menu_values[$selected]}"
-          OPTION_MENU_CONFIRMED=1
           NEED_FULL_REDRAW=1
           return 0
         fi
@@ -3830,7 +3865,6 @@ option_menu() {
         ;;
       ' '|$'\n'|$'\r')
         OPTION_MENU_VALUE="${menu_values[$selected]}"
-        OPTION_MENU_CONFIRMED=1
         NEED_FULL_REDRAW=1
         return 0
         ;;
@@ -3838,7 +3872,6 @@ option_menu() {
         idx=$(( key - 1 ))
         if (( idx < count )); then
           OPTION_MENU_VALUE="${menu_values[$idx]}"
-          OPTION_MENU_CONFIRMED=1
           NEED_FULL_REDRAW=1
           return 0
         fi
@@ -3846,7 +3879,6 @@ option_menu() {
       0)
         if (( count >= 10 )); then
           OPTION_MENU_VALUE="${menu_values[9]}"
-          OPTION_MENU_CONFIRMED=1
           NEED_FULL_REDRAW=1
           return 0
         fi
