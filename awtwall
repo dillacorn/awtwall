@@ -11,8 +11,10 @@ IFS=$'\n\t'
 # - Reduced flicker via partial redraw on navigation within the same page
 # - f = find (search prompt)
 # - R = refresh (rescans and clears active find filter)
-# - d = cycle swww transition duration
-# - p = cycle swww transition fps
+# - finite settings open selection menus with keyboard, number, and mouse input
+# - m/M = display selector with a live compositor layout when available
+# - d = select swww transition duration
+# - p = select swww transition fps
 # - E = configure optional post-exec hook
 # - count line renamed to total/shown
 # - startup never restores previous find filter
@@ -28,7 +30,7 @@ APP_NAME="awtwall"
 APP_ID="awtwall"
 
 # AWTWALL_VERSION_BLOCK_BEGIN
-AWTWALL_VERSION="${AWTWALL_VERSION:-v2.0}"  # bump for releases
+AWTWALL_VERSION="${AWTWALL_VERSION:-v2.1}"  # bump for releases
 AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
@@ -236,6 +238,8 @@ mkdir -p "${CONFIG_DIR}" "${THUMB_CACHE_DIR}" "${CACHE_DIR}"
 declare -a ALL_FILES=()
 declare -a FILES=()
 declare -a DISPLAY_CHOICES=()
+declare -a DISPLAY_LABELS=()
+declare -a DISPLAY_GEOMETRIES=()
 declare -a TARGET_OUTPUTS=()
 declare -a SWWW_DURATION_OPTIONS=(0.0 0.2 0.4 0.8 1.2 2.0 3.0 4.0)
 declare -a SWWW_FPS_OPTIONS=(15 24 30 45 60 90)
@@ -260,6 +264,17 @@ POST_EXEC_CMD=""             # persisted command run by bash -lc with AWTWALL_* 
 RANDOM_ACTION=""            # "" | current | all-same | all-different
 RANDOM_ALLOW_MPV=1          # 1=allow mpvpaper for random CLI actions
 FILTER_KIND_WAS_SET_BY_ARG=0  # 1 when --type was explicitly passed on the CLI
+DISPLAY_SOURCE=""
+DISPLAY_FOCUSED=""
+DISPLAY_LAYOUT_AVAILABLE=0
+
+OPTION_MENU_CONFIRMED=0
+OPTION_MENU_VALUE=""
+OPTION_MENU_TOP=0
+OPTION_MENU_LIST_START=0
+OPTION_MENU_LIST_END=0
+OPTION_MENU_VISIBLE_ROWS=0
+OPTION_MENU_LAYOUT_BOTTOM=0
 
 
 GRID_COLS=1
@@ -1052,30 +1067,6 @@ hash_for_file() {
 thumb_png_path() { printf '%s/%s.png' "$THUMB_CACHE_DIR" "$(hash_for_file "$1")"; }
 thumb_six_path() { printf '%s/%s.six' "$THUMB_CACHE_DIR" "$(hash_for_file "$1")"; }
 
-step_duration_cycle() {
-  local i next
-  for i in "${!SWWW_DURATION_OPTIONS[@]}"; do
-    if [[ "${SWWW_DURATION_OPTIONS[$i]}" == "$SWWW_TRANSITION_DURATION" ]]; then
-      next=$(( (i + 1) % ${#SWWW_DURATION_OPTIONS[@]} ))
-      SWWW_TRANSITION_DURATION="${SWWW_DURATION_OPTIONS[$next]}"
-      return 0
-    fi
-  done
-  SWWW_TRANSITION_DURATION="${SWWW_DURATION_OPTIONS[0]}"
-}
-
-step_fps_cycle() {
-  local i next
-  for i in "${!SWWW_FPS_OPTIONS[@]}"; do
-    if [[ "${SWWW_FPS_OPTIONS[$i]}" == "$SWWW_TRANSITION_FPS" ]]; then
-      next=$(( (i + 1) % ${#SWWW_FPS_OPTIONS[@]} ))
-      SWWW_TRANSITION_FPS="${SWWW_FPS_OPTIONS[$next]}"
-      return 0
-    fi
-  done
-  SWWW_TRANSITION_FPS="${SWWW_FPS_OPTIONS[0]}"
-}
-
 drain_pending_keys() {
   local _junk _i=0 _max="${1:-256}"
   while (( _i < _max )) && IFS= read -rsn1 -t 0.001 _junk; do
@@ -1304,9 +1295,17 @@ check_noninteractive_requirements() {
     missing=1
   fi
 
-  if [[ "$RANDOM_ACTION" == "current" ]] && ! have hyprctl; then
-    missing_cmds+=("hyprctl (needed to detect the focused monitor)")
-    missing=1
+  if [[ "$RANDOM_ACTION" == "current" ]]; then
+    if have hyprctl; then
+      :
+    elif have swaymsg && have jq; then
+      :
+    elif have niri && have jq; then
+      :
+    else
+      missing_cmds+=("hyprctl, swaymsg + jq, or niri + jq (needed to detect the focused monitor)")
+      missing=1
+    fi
   fi
 
   if (( RANDOM_ALLOW_MPV == 0 )); then
@@ -1573,31 +1572,191 @@ ensure_thumb_assets() {
 }
 
 # ---------- monitor / backend ----------
+display_choice_add() {
+  local name="$1" label="${2:-$1}" geometry="${3:-}" item
+  [[ -n "$name" ]] || return 1
+
+  for item in "${DISPLAY_CHOICES[@]}"; do
+    [[ "$item" == "$name" ]] && return 0
+  done
+
+  DISPLAY_CHOICES+=("$name")
+  DISPLAY_LABELS+=("$label")
+  DISPLAY_GEOMETRIES+=("$geometry")
+  [[ -n "$geometry" ]] && DISPLAY_LAYOUT_AVAILABLE=1
+  return 0
+}
+
+discover_hyprland_displays() {
+  local json name width height refresh x y logical_w logical_h focused label
+  local before=${#DISPLAY_CHOICES[@]}
+  have hyprctl || return 1
+
+  if have jq; then
+    json="$(hyprctl -j monitors 2>/dev/null || true)"
+    if jq -e 'type == "array"' >/dev/null 2>&1 <<<"$json"; then
+      while IFS=$'\t' read -r name width height refresh x y logical_w logical_h focused; do
+        [[ -n "$name" ]] || continue
+        label="${name} - ${width}x${height}"
+        (( refresh > 0 )) && label+="@${refresh}Hz"
+        label+=" - pos ${x},${y}"
+        if [[ "$focused" == "true" ]]; then
+          label+=" - focused"
+          DISPLAY_FOCUSED="$name"
+        fi
+        display_choice_add "$name" "$label" "${x}:${y}:${logical_w}:${logical_h}"
+      done < <(
+        jq -r '
+          .[]
+          | select((.disabled // false) == false)
+          | (.scale // 1) as $scale
+          | [
+              (.name // ""),
+              (.width // 0),
+              (.height // 0),
+              ((.refreshRate // 0) | round),
+              (.x // 0),
+              (.y // 0),
+              (if $scale > 0 then (((.width // 0) / $scale) | round) else (.width // 0) end),
+              (if $scale > 0 then (((.height // 0) / $scale) | round) else (.height // 0) end),
+              (.focused // false)
+            ]
+          | @tsv
+        ' <<<"$json" 2>/dev/null || true
+      )
+    fi
+  fi
+
+  if (( ${#DISPLAY_CHOICES[@]} == before )); then
+    while IFS= read -r name; do
+      [[ -n "$name" ]] || continue
+      display_choice_add "$name" "$name"
+    done < <(hyprctl monitors 2>/dev/null | sed -n 's/^Monitor \([^ ]*\) (ID .*/\1/p' || true)
+  fi
+
+  if (( ${#DISPLAY_CHOICES[@]} > before )); then
+    DISPLAY_SOURCE="Hyprland"
+    return 0
+  fi
+  return 1
+}
+
+discover_sway_displays() {
+  local json workspaces name width height refresh x y logical_w logical_h label
+  local before=${#DISPLAY_CHOICES[@]}
+  have swaymsg && have jq || return 1
+
+  json="$(swaymsg -t get_outputs -r 2>/dev/null || true)"
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$json" || return 1
+  workspaces="$(swaymsg -t get_workspaces -r 2>/dev/null || true)"
+  DISPLAY_FOCUSED="$(jq -r '.[] | select(.focused == true) | .output // empty' <<<"$workspaces" 2>/dev/null | head -n1 || true)"
+
+  while IFS=$'\t' read -r name width height refresh x y logical_w logical_h; do
+    [[ -n "$name" ]] || continue
+    label="${name} - ${width}x${height}"
+    (( refresh > 0 )) && label+="@${refresh}Hz"
+    label+=" - pos ${x},${y}"
+    [[ "$name" == "$DISPLAY_FOCUSED" ]] && label+=" - focused"
+    display_choice_add "$name" "$label" "${x}:${y}:${logical_w}:${logical_h}"
+  done < <(
+    jq -r '
+      .[]
+      | select(.active == true)
+      | [
+          (.name // ""),
+          (.current_mode.width // .rect.width // 0),
+          (.current_mode.height // .rect.height // 0),
+          (((.current_mode.refresh // 0) / 1000) | round),
+          (.rect.x // 0),
+          (.rect.y // 0),
+          (.rect.width // 0),
+          (.rect.height // 0)
+        ]
+      | @tsv
+    ' <<<"$json" 2>/dev/null || true
+  )
+
+  if (( ${#DISPLAY_CHOICES[@]} > before )); then
+    DISPLAY_SOURCE="Sway"
+    return 0
+  fi
+  return 1
+}
+
+discover_niri_displays() {
+  local json workspaces name width height refresh x y logical_w logical_h label
+  local before=${#DISPLAY_CHOICES[@]}
+  have niri && have jq || return 1
+
+  json="$(niri msg --json outputs 2>/dev/null || true)"
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$json" || return 1
+  workspaces="$(niri msg --json workspaces 2>/dev/null || true)"
+  DISPLAY_FOCUSED="$(jq -r '.[] | select(.is_focused == true) | .output // empty' <<<"$workspaces" 2>/dev/null | head -n1 || true)"
+
+  while IFS=$'\t' read -r name width height refresh x y logical_w logical_h; do
+    [[ -n "$name" ]] || continue
+    label="${name} - ${width}x${height}"
+    (( refresh > 0 )) && label+="@${refresh}Hz"
+    label+=" - pos ${x},${y}"
+    [[ "$name" == "$DISPLAY_FOCUSED" ]] && label+=" - focused"
+    display_choice_add "$name" "$label" "${x}:${y}:${logical_w}:${logical_h}"
+  done < <(
+    jq -r '
+      to_entries[]
+      | select(.value.logical != null)
+      | .value as $output
+      | ($output.current_mode // -1) as $mode_index
+      | [
+          .key,
+          (if $mode_index >= 0 then ($output.modes[$mode_index].width // 0) else ($output.logical.width // 0) end),
+          (if $mode_index >= 0 then ($output.modes[$mode_index].height // 0) else ($output.logical.height // 0) end),
+          (if $mode_index >= 0 then (($output.modes[$mode_index].refresh_rate // 0) / 1000 | round) else 0 end),
+          ($output.logical.x // 0),
+          ($output.logical.y // 0),
+          ($output.logical.width // 0),
+          ($output.logical.height // 0)
+        ]
+      | @tsv
+    ' <<<"$json" 2>/dev/null || true
+  )
+
+  if (( ${#DISPLAY_CHOICES[@]} > before )); then
+    DISPLAY_SOURCE="niri"
+    return 0
+  fi
+  return 1
+}
+
+discover_backend_displays() {
+  local name
+  local before=${#DISPLAY_CHOICES[@]}
+  have_swww_backend || return 1
+
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    display_choice_add "$name" "$name"
+  done < <("$SWWW_CMD" query 2>/dev/null | sed -n 's/^\([^:]*\):.*/\1/p' || true)
+
+  if (( ${#DISPLAY_CHOICES[@]} > before )); then
+    DISPLAY_SOURCE="$(backend_label swww)"
+    return 0
+  fi
+  return 1
+}
+
 refresh_display_choices() {
-  local cur="$DISPLAY_TARGET" name item found=0
-  local -A seen=()
+  local cur="$DISPLAY_TARGET" item found=0
   DISPLAY_CHOICES=("All displays")
-  seen["All displays"]=1
+  DISPLAY_LABELS=("All displays")
+  DISPLAY_GEOMETRIES=("")
+  DISPLAY_SOURCE=""
+  DISPLAY_FOCUSED=""
+  DISPLAY_LAYOUT_AVAILABLE=0
 
-  if have hyprctl && have jq; then
-    while IFS= read -r name; do
-      [[ -n "$name" ]] || continue
-      if [[ -z "${seen[$name]:-}" ]]; then
-        DISPLAY_CHOICES+=("$name")
-        seen["$name"]=1
-      fi
-    done < <(hyprctl -j monitors 2>/dev/null | jq -r '.[].name // empty' 2>/dev/null || true)
-  fi
-
-  if (( ${#DISPLAY_CHOICES[@]} == 1 )) && have_swww_backend; then
-    while IFS= read -r name; do
-      [[ -n "$name" ]] || continue
-      if [[ -z "${seen[$name]:-}" ]]; then
-        DISPLAY_CHOICES+=("$name")
-        seen["$name"]=1
-      fi
-    done < <("$SWWW_CMD" query 2>/dev/null | sed -n 's/^\([^:]*\):.*/\1/p' || true)
-  fi
+  discover_hyprland_displays ||
+    discover_sway_displays ||
+    discover_niri_displays ||
+    discover_backend_displays || true
 
   for item in "${DISPLAY_CHOICES[@]}"; do
     if [[ "$item" == "$cur" ]]; then
@@ -1615,6 +1774,11 @@ refresh_display_choices() {
 focused_output_name() {
   local out=""
 
+  if [[ -n "${DISPLAY_FOCUSED:-}" ]]; then
+    printf '%s\n' "$DISPLAY_FOCUSED"
+    return 0
+  fi
+
   if have hyprctl && have jq; then
     out="$(hyprctl -j monitors 2>/dev/null | jq -r '.[] | select(.focused==true) | .name' | head -n1 || true)"
     if [[ -n "$out" && "$out" != "null" ]]; then
@@ -1625,6 +1789,22 @@ focused_output_name() {
 
   if have hyprctl; then
     out="$(hyprctl activeworkspace 2>/dev/null | sed -n 's/.* on monitor \([^:]*\):.*/\1/p' | head -n1 || true)"
+    if [[ -n "$out" ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+  fi
+
+  if have swaymsg && have jq; then
+    out="$(swaymsg -t get_workspaces -r 2>/dev/null | jq -r '.[] | select(.focused == true) | .output // empty' 2>/dev/null | head -n1 || true)"
+    if [[ -n "$out" ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+  fi
+
+  if have niri && have jq; then
+    out="$(niri msg --json workspaces 2>/dev/null | jq -r '.[] | select(.is_focused == true) | .output // empty' 2>/dev/null | head -n1 || true)"
     if [[ -n "$out" ]]; then
       printf '%s\n' "$out"
       return 0
@@ -2886,7 +3066,7 @@ draw_empty_grid() {
 
   row=$(( lines - 2 ))
   ui_goto "$row" 1; ui_clear_line; ui_dim
-  printf '%-*.*s' "$cols" "$cols" "keys: q quit | R refresh | f find | e type | b backend | m display | o open dir"
+  printf '%-*.*s' "$cols" "$cols" "keys: q quit | R refresh | f find | e choose type | b choose backend | m/M choose display | o open dir"
   ui_color_reset
 }
 
@@ -2982,7 +3162,7 @@ draw_help() {
   ui_color_reset
 
   ui_goto "$row2" 1; ui_clear_line; ui_dim
-  printf '%-*.*s' "$cols" "$cols"     " q quit | v version | D dir | n recurse | e type | b backend | m display | E post-exec | z resize | t trans | d dur | p fps | i interp "
+  printf '%-*.*s' "$cols" "$cols"     " q quit | v version | D dir | n recurse | e type menu | b backend menu | m/M display menu | E post-exec | z resize | t trans | d dur | p fps | i interp "
   ui_color_reset
 }
 
@@ -3246,6 +3426,14 @@ read_key() {
     return 1
   fi
 
+  # With the terminal's normal ICRNL translation, Enter arrives as a newline.
+  # `read` consumes that delimiter and leaves an empty value; emit carriage return
+  # so command substitution does not strip it and both the main UI and menus see Enter.
+  if [[ -z "$key" ]]; then
+    printf '\r'
+    return 0
+  fi
+
   if [[ "$key" != $'\x1b' ]]; then
     printf '%s' "$key"
     return 0
@@ -3335,6 +3523,332 @@ prompt_line() {
   printf '%s' "$input"
 }
 
+draw_monitor_layout() {
+  local selected="$1" start_row="$2" max_height="$3"
+  local cols diagram_width diagram_height min_x=0 min_y=0 max_x=0 max_y=0
+  local geometry x y width height i count=0 first=1 total_width total_height
+  local sx sy ex ey box_width box_height row border label label_width
+
+  OPTION_MENU_LAYOUT_BOTTOM=$(( start_row - 1 ))
+  (( DISPLAY_LAYOUT_AVAILABLE == 1 )) || return 1
+
+  for i in "${!DISPLAY_CHOICES[@]}"; do
+    geometry="${DISPLAY_GEOMETRIES[$i]:-}"
+    [[ -n "$geometry" ]] || continue
+    IFS=: read -r x y width height <<<"$geometry"
+    [[ "$x" =~ ^-?[0-9]+$ && "$y" =~ ^-?[0-9]+$ && "$width" =~ ^[0-9]+$ && "$height" =~ ^[0-9]+$ ]] || continue
+    (( width > 0 && height > 0 )) || continue
+
+    if (( first == 1 )); then
+      min_x=$x
+      min_y=$y
+      max_x=$(( x + width ))
+      max_y=$(( y + height ))
+      first=0
+    else
+      (( x < min_x )) && min_x=$x
+      (( y < min_y )) && min_y=$y
+      (( x + width > max_x )) && max_x=$(( x + width ))
+      (( y + height > max_y )) && max_y=$(( y + height ))
+    fi
+    count=$(( count + 1 ))
+  done
+
+  (( count > 0 )) || return 1
+  total_width=$(( max_x - min_x ))
+  total_height=$(( max_y - min_y ))
+  (( total_width > 0 && total_height > 0 )) || return 1
+
+  cols="$(term_cols)"
+  diagram_width=$(( cols - 6 ))
+  (( diagram_width > 88 )) && diagram_width=88
+  (( diagram_width >= 18 )) || return 1
+
+  diagram_height=$max_height
+  (( diagram_height > 7 )) && diagram_height=7
+  (( diagram_height >= 4 )) || return 1
+  OPTION_MENU_LAYOUT_BOTTOM=$(( start_row + diagram_height - 1 ))
+
+  for i in "${!DISPLAY_CHOICES[@]}"; do
+    geometry="${DISPLAY_GEOMETRIES[$i]:-}"
+    [[ -n "$geometry" ]] || continue
+    IFS=: read -r x y width height <<<"$geometry"
+    [[ "$x" =~ ^-?[0-9]+$ && "$y" =~ ^-?[0-9]+$ && "$width" =~ ^[0-9]+$ && "$height" =~ ^[0-9]+$ ]] || continue
+    (( width > 0 && height > 0 )) || continue
+
+    sx=$(( 3 + (x - min_x) * (diagram_width - 1) / total_width ))
+    ex=$(( 3 + (x + width - min_x) * (diagram_width - 1) / total_width ))
+    sy=$(( start_row + (y - min_y) * (diagram_height - 1) / total_height ))
+    ey=$(( start_row + (y + height - min_y) * (diagram_height - 1) / total_height ))
+
+    (( ex <= sx + 3 )) && ex=$(( sx + 4 ))
+    (( ey <= sy + 1 )) && ey=$(( sy + 2 ))
+    (( ex > cols - 2 )) && ex=$(( cols - 2 ))
+    (( ey > OPTION_MENU_LAYOUT_BOTTOM )) && ey=$OPTION_MENU_LAYOUT_BOTTOM
+
+    box_width=$(( ex - sx + 1 ))
+    box_height=$(( ey - sy + 1 ))
+    (( box_width >= 5 && box_height >= 3 )) || continue
+
+    printf -v border '%*s' "$(( box_width - 2 ))" ''
+    border="${border// /-}"
+    ui_goto "$sy" "$sx"
+    printf '+%s+' "$border"
+    for (( row = sy + 1; row < ey; row++ )); do
+      ui_goto "$row" "$sx"
+      printf '|'
+      ui_goto "$row" "$ex"
+      printf '|'
+    done
+    ui_goto "$ey" "$sx"
+    printf '+%s+' "$border"
+
+    label="$(( i + 1 )). ${DISPLAY_CHOICES[$i]}"
+    label_width=$(( box_width - 2 ))
+    label="$(pad_trunc "$label" "$label_width")"
+    ui_goto "$(( sy + 1 ))" "$(( sx + 1 ))"
+    if [[ "${DISPLAY_CHOICES[$i]}" == "$selected" ]]; then
+      ui_rev
+      printf '%s' "$label"
+      ui_color_reset
+    else
+      printf '%s' "$label"
+    fi
+  done
+
+  return 0
+}
+
+draw_option_menu() {
+  local title="$1" current="$2" selected="$3" requested_top="$4"
+  local values_name="$5" labels_name="$6" show_layout="${7:-0}"
+  local -n menu_values="$values_name"
+  local -n menu_labels="$labels_name"
+  local cols lines list_start available_rows count top end i row key_hint marker text width
+  local layout_height=0 subtitle
+
+  cols="$(term_cols)"
+  lines="$(term_lines)"
+  count=${#menu_values[@]}
+  ui_clear
+
+  width=$(( cols - 4 ))
+  (( width < 1 )) && width=1
+  ui_goto 2 3
+  ui_clear_line
+  ui_bold
+  printf '%-*.*s' "$width" "$width" "$title"
+  ui_color_reset
+
+  if (( show_layout == 1 )); then
+    subtitle="Live outputs: ${DISPLAY_SOURCE:-names only}"
+  else
+    subtitle="Current: ${current}"
+  fi
+  ui_goto 3 3
+  ui_clear_line
+  ui_dim
+  printf '%-*.*s' "$width" "$width" "$subtitle"
+  ui_color_reset
+
+  list_start=5
+  if (( show_layout == 1 && DISPLAY_LAYOUT_AVAILABLE == 1 && lines >= 18 )); then
+    layout_height=$(( lines - 12 ))
+    (( layout_height > 7 )) && layout_height=7
+    if draw_monitor_layout "${menu_values[$selected]}" 5 "$layout_height"; then
+      list_start=$(( OPTION_MENU_LAYOUT_BOTTOM + 2 ))
+    fi
+  fi
+
+  available_rows=$(( lines - list_start - 2 ))
+  (( available_rows < 1 )) && available_rows=1
+  (( available_rows > count )) && available_rows=$count
+
+  top=$requested_top
+  (( top < 0 )) && top=0
+  if (( selected < top )); then
+    top=$selected
+  elif (( selected >= top + available_rows )); then
+    top=$(( selected - available_rows + 1 ))
+  fi
+  (( top < 0 )) && top=0
+  if (( top + available_rows > count )); then
+    top=$(( count - available_rows ))
+  fi
+  (( top < 0 )) && top=0
+
+  end=$(( top + available_rows - 1 ))
+  OPTION_MENU_TOP=$top
+  OPTION_MENU_LIST_START=$list_start
+  OPTION_MENU_LIST_END=$(( list_start + available_rows - 1 ))
+  OPTION_MENU_VISIBLE_ROWS=$available_rows
+
+  row=$list_start
+  for (( i = top; i <= end; i++ )); do
+    if (( i < 9 )); then
+      key_hint=$(( i + 1 ))
+    elif (( i == 9 )); then
+      key_hint=0
+    else
+      key_hint='-'
+    fi
+    marker=' '
+    [[ "${menu_values[$i]}" == "$current" ]] && marker='*'
+    text=" ${marker} [${key_hint}] ${menu_labels[$i]}"
+    ui_goto "$row" 3
+    ui_clear_line
+    if (( i == selected )); then
+      ui_rev
+      printf '%-*.*s' "$width" "$width" "$text"
+      ui_color_reset
+    else
+      printf '%-*.*s' "$width" "$width" "$text"
+    fi
+    row=$(( row + 1 ))
+  done
+
+  ui_goto "$(( lines - 1 ))" 1
+  ui_clear_line
+  ui_dim
+  printf '%-*.*s' "$cols" "$cols" " arrows/jk move | 1-9/0 select | Enter/Space select | click select | Esc/q cancel | * current "
+  ui_color_reset
+}
+
+option_menu() {
+  local title="$1" current="$2" values_name="$3" labels_name="$4" show_layout="${5:-0}"
+  local -n menu_values="$values_name"
+  local -n menu_labels="$labels_name"
+  local selected=0 top=0 key count i code x y kind btn idx old_cols old_lines
+  local redraw=1 new_cols new_lines
+  local re=$'^\e\[<([0-9]+);([0-9]+);([0-9]+)([Mm])$'
+
+  OPTION_MENU_CONFIRMED=0
+  OPTION_MENU_VALUE=""
+  count=${#menu_values[@]}
+  (( count > 0 )) || return 1
+  (( ${#menu_labels[@]} == count )) || return 1
+
+  for i in "${!menu_values[@]}"; do
+    if [[ "${menu_values[$i]}" == "$current" ]]; then
+      selected=$i
+      break
+    fi
+  done
+
+  if [[ "${PREVIEW_MODE}" == "kitty" ]]; then
+    kitty_clear_images
+  fi
+  old_cols="$(term_cols)"
+  old_lines="$(term_lines)"
+
+  while true; do
+    if (( redraw == 1 )); then
+      draw_option_menu "$title" "$current" "$selected" "$top" "$values_name" "$labels_name" "$show_layout"
+      top=$OPTION_MENU_TOP
+      redraw=0
+    fi
+
+    key="$(read_key || true)"
+    if [[ -z "$key" ]]; then
+      new_cols="$(term_cols)"
+      new_lines="$(term_lines)"
+      if [[ "$new_cols" != "$old_cols" || "$new_lines" != "$old_lines" ]]; then
+        old_cols="$new_cols"
+        old_lines="$new_lines"
+        redraw=1
+      fi
+      continue
+    fi
+
+    if [[ "$key" =~ $re ]]; then
+      code="${BASH_REMATCH[1]}"
+      x="${BASH_REMATCH[2]}"
+      y="${BASH_REMATCH[3]}"
+      kind="${BASH_REMATCH[4]}"
+      [[ "$kind" == "M" ]] || continue
+
+      if (( (code & 64) != 0 )); then
+        case "$code" in
+          64) (( selected > 0 )) && selected=$(( selected - 1 )) ;;
+          65) (( selected + 1 < count )) && selected=$(( selected + 1 )) ;;
+        esac
+        redraw=1
+        continue
+      fi
+      (( (code & 32) == 0 )) || continue
+      btn=$(( code & 3 ))
+      (( btn == 0 )) || continue
+      if (( y >= OPTION_MENU_LIST_START && y <= OPTION_MENU_LIST_END && x >= 1 )); then
+        idx=$(( OPTION_MENU_TOP + y - OPTION_MENU_LIST_START ))
+        if (( idx >= 0 && idx < count )); then
+          selected=$idx
+          OPTION_MENU_VALUE="${menu_values[$selected]}"
+          OPTION_MENU_CONFIRMED=1
+          NEED_FULL_REDRAW=1
+          return 0
+        fi
+      fi
+      continue
+    fi
+
+    case "$key" in
+      $'\e'|q|Q)
+        NEED_FULL_REDRAW=1
+        return 1
+        ;;
+      $'\e[A'|k|$'\e[D'|h)
+        (( selected > 0 )) && selected=$(( selected - 1 ))
+        redraw=1
+        ;;
+      $'\e[B'|j|$'\e[C'|l)
+        (( selected + 1 < count )) && selected=$(( selected + 1 ))
+        redraw=1
+        ;;
+      $'\e[5~')
+        selected=$(( selected - OPTION_MENU_VISIBLE_ROWS ))
+        (( selected < 0 )) && selected=0
+        redraw=1
+        ;;
+      $'\e[6~')
+        selected=$(( selected + OPTION_MENU_VISIBLE_ROWS ))
+        (( selected >= count )) && selected=$(( count - 1 ))
+        redraw=1
+        ;;
+      $'\e[H'|$'\e[1~')
+        selected=0
+        redraw=1
+        ;;
+      $'\e[F'|$'\e[4~')
+        selected=$(( count - 1 ))
+        redraw=1
+        ;;
+      ' '|$'\n'|$'\r')
+        OPTION_MENU_VALUE="${menu_values[$selected]}"
+        OPTION_MENU_CONFIRMED=1
+        NEED_FULL_REDRAW=1
+        return 0
+        ;;
+      [1-9])
+        idx=$(( key - 1 ))
+        if (( idx < count )); then
+          OPTION_MENU_VALUE="${menu_values[$idx]}"
+          OPTION_MENU_CONFIRMED=1
+          NEED_FULL_REDRAW=1
+          return 0
+        fi
+        ;;
+      0)
+        if (( count >= 10 )); then
+          OPTION_MENU_VALUE="${menu_values[9]}"
+          OPTION_MENU_CONFIRMED=1
+          NEED_FULL_REDRAW=1
+          return 0
+        fi
+        ;;
+    esac
+  done
+}
+
 move_sel_delta() {
   local delta="$1"
   if (( ${#FILES[@]} == 0 )); then return 0; fi
@@ -3351,121 +3865,160 @@ move_sel_grid() {
   update_focus_state || true
 }
 
-cycle_backend() {
-  case "$BACKEND" in
-    swww) BACKEND="hyprpaper" ;;
-    hyprpaper) BACKEND="mpvpaper" ;;
-    mpvpaper) BACKEND="swww" ;;
-    *) BACKEND="swww" ;;
-  esac
+choose_backend() {
+  local backend
+  local -a values=() labels=()
+
+  for backend in swww hyprpaper mpvpaper; do
+    backend_is_available "$backend" || continue
+    values+=("$backend")
+    case "$backend" in
+      swww) labels+=("$(backend_label swww) - still images and GIFs") ;;
+      hyprpaper) labels+=("hyprpaper - still images") ;;
+      mpvpaper) labels+=("mpvpaper - MP4 video") ;;
+    esac
+  done
+
+  if (( ${#values[@]} == 0 )); then
+    msg "No wallpaper backend is available"
+    NEED_FULL_REDRAW=1
+    return 0
+  fi
+  if ! option_menu "Select wallpaper backend" "$BACKEND" values labels; then
+    msg "Backend unchanged: $(backend_label "$BACKEND")"
+    return 0
+  fi
+
+  BACKEND="$OPTION_MENU_VALUE"
   save_state
   msg "Backend: $(backend_label "$BACKEND")"
   NEED_FULL_REDRAW=1
 }
 
-cycle_filter_kind() {
-  case "$FILTER_KIND" in
-    ALL) FILTER_KIND="IMAGES" ;;
-    IMAGES) FILTER_KIND="GIF" ;;
-    GIF) FILTER_KIND="MP4" ;;
-    MP4) FILTER_KIND="ALL" ;;
-    *) FILTER_KIND="ALL" ;;
-  esac
-  build_filtered
-  if (( ${#FILES[@]} > 0 )); then
-    SEL=0
-  else
-    SEL=0
+choose_filter_kind() {
+  local -a values=(ALL IMAGES GIF MP4)
+  local -a labels=("All supported media" "Still images" "Animated GIFs" "MP4 videos")
+
+  if ! option_menu "Select media type" "$FILTER_KIND" values labels; then
+    msg "Type unchanged: $FILTER_KIND"
+    return 0
   fi
+
+  if [[ "$OPTION_MENU_VALUE" == "$FILTER_KIND" ]]; then
+    msg "Type unchanged: $FILTER_KIND"
+    return 0
+  fi
+
+  FILTER_KIND="$OPTION_MENU_VALUE"
+  build_filtered
+  SEL=0
+  update_focus_state || true
   save_state
   msg "Type: $FILTER_KIND"
   NEED_FULL_REDRAW=1
 }
 
-cycle_display() {
-  local i next
-  (( ${#DISPLAY_CHOICES[@]} == 0 )) && refresh_display_choices
-  for i in "${!DISPLAY_CHOICES[@]}"; do
-    if [[ "${DISPLAY_CHOICES[$i]}" == "$DISPLAY_TARGET" ]]; then
-      next=$(( (i + 1) % ${#DISPLAY_CHOICES[@]} ))
-      DISPLAY_TARGET="${DISPLAY_CHOICES[$next]}"
-      save_state
-      msg "Display: $DISPLAY_TARGET"
-      NEED_FULL_REDRAW=1
-      return 0
-    fi
-  done
-  DISPLAY_TARGET="All displays"
+choose_display() {
+  refresh_display_choices
+  if ! option_menu "Select display target" "$DISPLAY_TARGET" DISPLAY_CHOICES DISPLAY_LABELS 1; then
+    msg "Display unchanged: $DISPLAY_TARGET"
+    return 0
+  fi
+
+  DISPLAY_TARGET="$OPTION_MENU_VALUE"
   save_state
   msg "Display: $DISPLAY_TARGET"
   NEED_FULL_REDRAW=1
 }
 
-cycle_swww_resize() {
-  case "$SWWW_RESIZE" in
-    crop) SWWW_RESIZE="fit" ;;
-    fit) SWWW_RESIZE="stretch" ;;
-    stretch) SWWW_RESIZE="no" ;;
-    no) SWWW_RESIZE="crop" ;;
-    *) SWWW_RESIZE="crop" ;;
-  esac
+choose_swww_resize() {
+  local -a values=(crop fit stretch no)
+  local -a labels=("Crop to fill" "Fit inside display" "Stretch to display" "Do not resize")
+
+  if ! option_menu "Select $(swww_family_label) resize mode" "$SWWW_RESIZE" values labels; then
+    msg "$(swww_family_label) resize unchanged: $SWWW_RESIZE"
+    return 0
+  fi
+  SWWW_RESIZE="$OPTION_MENU_VALUE"
   save_state
   msg "$(swww_family_label) resize: $SWWW_RESIZE"
-  draw_status_bars
+  NEED_FULL_REDRAW=1
 }
 
-cycle_swww_transition() {
-  case "$SWWW_TRANSITION_TYPE" in
-    fade) SWWW_TRANSITION_TYPE="grow" ;;
-    grow) SWWW_TRANSITION_TYPE="outer" ;;
-    outer) SWWW_TRANSITION_TYPE="any" ;;
-    any) SWWW_TRANSITION_TYPE="random" ;;
-    random) SWWW_TRANSITION_TYPE="fade" ;;
-    *) SWWW_TRANSITION_TYPE="grow" ;;
-  esac
+choose_swww_transition() {
+  local -a values=(fade grow outer any random)
+  local -a labels=("Fade" "Grow" "Outer" "Any" "Random")
+
+  if ! option_menu "Select $(swww_family_label) transition" "$SWWW_TRANSITION_TYPE" values labels; then
+    msg "$(swww_family_label) transition unchanged: $SWWW_TRANSITION_TYPE"
+    return 0
+  fi
+  SWWW_TRANSITION_TYPE="$OPTION_MENU_VALUE"
   save_state
   msg "$(swww_family_label) transition: $SWWW_TRANSITION_TYPE"
-  draw_status_bars
+  NEED_FULL_REDRAW=1
 }
 
-cycle_swww_duration() {
-  step_duration_cycle
+choose_swww_duration() {
+  local value
+  local -a labels=()
+  for value in "${SWWW_DURATION_OPTIONS[@]}"; do
+    labels+=("${value} seconds")
+  done
+
+  if ! option_menu "Select $(swww_family_label) transition duration" "$SWWW_TRANSITION_DURATION" SWWW_DURATION_OPTIONS labels; then
+    msg "$(swww_family_label) duration unchanged: ${SWWW_TRANSITION_DURATION}s"
+    return 0
+  fi
+  SWWW_TRANSITION_DURATION="$OPTION_MENU_VALUE"
   save_state
   msg "$(swww_family_label) duration: ${SWWW_TRANSITION_DURATION}s"
-  draw_status_bars
+  NEED_FULL_REDRAW=1
 }
 
-cycle_swww_fps() {
-  step_fps_cycle
+choose_swww_fps() {
+  local value
+  local -a labels=()
+  for value in "${SWWW_FPS_OPTIONS[@]}"; do
+    labels+=("${value} FPS")
+  done
+
+  if ! option_menu "Select $(swww_family_label) transition FPS" "$SWWW_TRANSITION_FPS" SWWW_FPS_OPTIONS labels; then
+    msg "$(swww_family_label) FPS unchanged: $SWWW_TRANSITION_FPS"
+    return 0
+  fi
+  SWWW_TRANSITION_FPS="$OPTION_MENU_VALUE"
   save_state
-  msg "$(swww_family_label) fps: ${SWWW_TRANSITION_FPS}"
-  draw_status_bars
+  msg "$(swww_family_label) FPS: $SWWW_TRANSITION_FPS"
+  NEED_FULL_REDRAW=1
 }
 
-cycle_swww_interp() {
-  case "$SWWW_FILTER" in
-    Lanczos3) SWWW_FILTER="Nearest" ;;
-    Nearest) SWWW_FILTER="Bilinear" ;;
-    Bilinear) SWWW_FILTER="CatmullRom" ;;
-    CatmullRom) SWWW_FILTER="Mitchell" ;;
-    Mitchell) SWWW_FILTER="Lanczos3" ;;
-    *) SWWW_FILTER="Lanczos3" ;;
-  esac
+choose_swww_interp() {
+  local -a values=(Lanczos3 Nearest Bilinear CatmullRom Mitchell)
+  local -a labels=("Lanczos3" "Nearest" "Bilinear" "Catmull-Rom" "Mitchell")
+
+  if ! option_menu "Select $(swww_family_label) interpolation filter" "$SWWW_FILTER" values labels; then
+    msg "$(swww_family_label) interpolation unchanged: $SWWW_FILTER"
+    return 0
+  fi
+  SWWW_FILTER="$OPTION_MENU_VALUE"
   save_state
-  msg "$(swww_family_label) interp: $SWWW_FILTER"
-  draw_status_bars
+  msg "$(swww_family_label) interpolation: $SWWW_FILTER"
+  NEED_FULL_REDRAW=1
 }
 
-cycle_hyprpaper_mode() {
-  case "$HYPERPAPER_MODE" in
-    cover) HYPERPAPER_MODE="contain" ;;
-    contain) HYPERPAPER_MODE="center" ;;
-    center) HYPERPAPER_MODE="cover" ;;
-    *) HYPERPAPER_MODE="cover" ;;
-  esac
+choose_hyprpaper_mode() {
+  local -a values=(cover contain center)
+  local -a labels=("Cover display" "Contain entire image" "Center at original size")
+
+  if ! option_menu "Select hyprpaper mode" "$HYPERPAPER_MODE" values labels; then
+    msg "hyprpaper mode unchanged: $HYPERPAPER_MODE"
+    return 0
+  fi
+  HYPERPAPER_MODE="$OPTION_MENU_VALUE"
   save_state
   msg "hyprpaper mode: $HYPERPAPER_MODE"
-  draw_status_bars
+  NEED_FULL_REDRAW=1
 }
 
 random_apply() {
@@ -3895,35 +4448,34 @@ main() {
         toggle_recursive
         ;;
       e)
-        cycle_filter_kind
+        choose_filter_kind
         ;;
       b)
-        cycle_backend
+        choose_backend
         ;;
-      m)
-        refresh_display_choices
-        cycle_display
+      m|M)
+        choose_display
         ;;
       E)
         do_post_exec_prompt
         ;;
       z)
-        cycle_swww_resize
+        choose_swww_resize
         ;;
       t)
-        cycle_swww_transition
+        choose_swww_transition
         ;;
       d)
-        cycle_swww_duration
+        choose_swww_duration
         ;;
       p)
-        cycle_swww_fps
+        choose_swww_fps
         ;;
       i)
-        cycle_swww_interp
+        choose_swww_interp
         ;;
       P)
-        cycle_hyprpaper_mode
+        choose_hyprpaper_mode
         ;;
       o)
         open_dir
