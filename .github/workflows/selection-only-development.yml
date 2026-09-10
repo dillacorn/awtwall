@@ -1,0 +1,51 @@
+name: Selection-only development
+
+on:
+  push:
+    branches:
+      - feature/selection-only-picker
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/selection-only-picker
+          fetch-depth: 0
+
+      - name: Verify regression is red before implementation
+        shell: bash
+        run: |
+          set +e
+          bash tests/test-selection-only.sh
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+
+      - name: Apply selection-only implementation
+        run: python3 .github/scripts/apply-selection-only-picker.py
+
+      - name: Validate focused contract
+        shell: bash
+        run: |
+          bash -n awtwall
+          bash tests/test-selection-only.sh
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck awtwall tests/test-selection-only.sh
+          fi
+          git diff --check
+
+      - name: Commit validated implementation
+        shell: bash
+        run: |
+          git config user.name "dillacorn"
+          git config user.email "28743863+dillacorn@users.noreply.github.com"
+          git add awtwall tests/test-selection-only.sh
+          git diff --cached --check
+          git commit -m "Add selection-only picker mode [skip ci]"
+          git push origin HEAD:feature/selection-only-picker
