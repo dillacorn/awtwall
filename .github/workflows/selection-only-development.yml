@@ -55,8 +55,22 @@ jobs:
         shell: bash
         run: |
           if command -v shellcheck >/dev/null 2>&1; then
-            shellcheck tests/test-selection-only.sh
+            set +e
+            shellcheck -f gcc tests/test-selection-only.sh 2>&1 | tee /tmp/shellcheck-focused.txt
+            rc=${PIPESTATUS[0]}
+            set -e
+            test "$rc" -eq 0
+          else
+            : > /tmp/shellcheck-focused.txt
           fi
+
+      - name: Upload focused ShellCheck output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selection-only-shellcheck
+          path: /tmp/shellcheck-focused.txt
+          if-no-files-found: ignore
 
       - name: ShellCheck app delta
         shell: bash
