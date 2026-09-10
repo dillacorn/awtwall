@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2034,SC2294
-# The focused harness intentionally evaluates exact extracted functions from the
-# monolithic TUI so their result-file behavior is exercised without launching
-# an interactive terminal. Globals referenced only by those extracted functions
-# therefore look unused to static analysis.
+# shellcheck disable=SC2016,SC2034,SC2294
+# The focused harness intentionally checks literal shell source, evaluates exact
+# extracted functions from the monolithic TUI, and provides globals that are
+# consumed only by those extracted functions. Those patterns are deliberate.
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
