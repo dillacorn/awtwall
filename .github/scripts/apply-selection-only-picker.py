@@ -247,7 +247,7 @@ replace_once(
   if [[ -n "$SELECT_RESULT_FILE" && "$SELECTION_ONLY" != "1" ]]; then
     die "--select-result requires --select-only"
   fi
-  if [[ "$SELECT_RESULT_FILE" == *$'\\n'* || "$SELECT_RESULT_FILE" == *$'\\r'* ]]; then
+  if [[ "$SELECT_RESULT_FILE" == *$'\n'* || "$SELECT_RESULT_FILE" == *$'\r'* ]]; then
     die "--select-result contains an invalid control character"
   fi
   if (( SELECTION_ONLY == 1 )) && { (( RESTORE_ONLY == 1 )) || [[ -n "$RANDOM_ACTION" ]]; }; then
@@ -272,7 +272,7 @@ replace_once(
           RUNNING=0
         fi
         ;;
-      $'\\e')
+      $'\e')
         if (( SELECTION_ONLY == 1 )); then
           selection_cancel
         else
