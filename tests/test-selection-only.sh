@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 APP="${ROOT}/awtwall"
 TMP="$(mktemp -d)"
-trap 'rm -rf -- "$TMP"' RETURN
+trap 'rm -rf -- "$TMP"' EXIT
 
 fail() {
     printf 'FAIL: %s\n' "$*" >&2
@@ -60,7 +60,8 @@ selection_cancel
 [[ ! -e "$result" ]] || fail 'cancel created or modified a selection result'
 [[ "$RUNNING" == "0" ]] || fail 'cancel did not request picker shutdown'
 
-if bash "$APP" --select-result "$result" </dev/null >"${TMP}/stdout" 2>"${TMP}/stderr"; then
+if HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/config" XDG_CACHE_HOME="$TMP/cache" \
+    bash "$APP" --select-result "$result" </dev/null >"${TMP}/stdout" 2>"${TMP}/stderr"; then
     fail '--select-result without --select-only unexpectedly succeeded'
 fi
 grep -Fq -- '--select-result requires --select-only' "${TMP}/stderr" \
