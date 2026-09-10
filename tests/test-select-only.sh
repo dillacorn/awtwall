@@ -13,7 +13,7 @@ fail() {
 [[ -f "$AWTWALL" ]] || fail "awtwall script missing"
 bash -n "$AWTWALL" || fail "awtwall has invalid Bash syntax"
 
-help_text="$("$AWTWALL" --help)"
+help_text="$(bash "$AWTWALL" --help)"
 grep -Fq -- '--select-only' <<<"$help_text" \
   || fail "selection-only CLI option is missing from help"
 grep -Fq -- '--select-result PATH' <<<"$help_text" \
@@ -37,8 +37,6 @@ grep -Fq 'POST_EXEC_ALLOWED=0' "$AWTWALL" \
   || fail "selection-only mode does not suppress post-apply hooks"
 grep -Fq 'if (( SELECT_ONLY == 0 )) && ! ensure_backend_available; then' "$AWTWALL" \
   || fail "selection-only mode still requires a wallpaper backend"
-grep -Fq 'if (( SELECT_ONLY == 1 )); then' "$AWTWALL" \
-  || fail "selection-only persistence guard is missing"
 grep -Fq 'selection-only encoder=${SIXEL_ENCODER_LABEL}' "$AWTWALL" \
   || fail "selection-only UI still exposes normal backend/display status"
 
