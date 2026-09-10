@@ -30,15 +30,24 @@ jobs:
       - name: Apply selection-only implementation
         run: python3 .github/scripts/apply-selection-only-picker.py
 
+      - name: Validate Bash syntax
+        shell: bash
+        run: bash -n awtwall
+
       - name: Validate focused contract
         shell: bash
+        run: bash tests/test-selection-only.sh
+
+      - name: Validate whitespace
+        shell: bash
+        run: git diff --check
+
+      - name: Validate ShellCheck
+        shell: bash
         run: |
-          bash -n awtwall
-          bash tests/test-selection-only.sh
           if command -v shellcheck >/dev/null 2>&1; then
             shellcheck awtwall tests/test-selection-only.sh
           fi
-          git diff --check
 
       - name: Commit validated implementation
         shell: bash
