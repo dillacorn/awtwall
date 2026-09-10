@@ -27,6 +27,15 @@ jobs:
           set -e
           test "$rc" -ne 0
 
+      - name: Capture baseline ShellCheck diagnostics
+        shell: bash
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck -f json awtwall > /tmp/shellcheck-before.json || true
+          else
+            printf '[]\n' > /tmp/shellcheck-before.json
+          fi
+
       - name: Apply selection-only implementation
         run: python3 .github/scripts/apply-selection-only-picker.py
 
@@ -42,11 +51,30 @@ jobs:
         shell: bash
         run: git diff --check
 
-      - name: Validate ShellCheck
+      - name: Validate ShellCheck delta
         shell: bash
         run: |
           if command -v shellcheck >/dev/null 2>&1; then
-            shellcheck awtwall tests/test-selection-only.sh
+            shellcheck tests/test-selection-only.sh
+            shellcheck -f json awtwall > /tmp/shellcheck-after.json || true
+            python3 - <<'PY'
+          import collections
+          import json
+
+          def counts(path):
+              with open(path, encoding='utf-8') as handle:
+                  rows = json.load(handle)
+              return collections.Counter((row['code'], row['message']) for row in rows)
+
+          before = counts('/tmp/shellcheck-before.json')
+          after = counts('/tmp/shellcheck-after.json')
+          added = after - before
+          if added:
+              for (code, message), count in sorted(added.items()):
+                  print(f'new ShellCheck diagnostic SC{code} x{count}: {message}')
+              raise SystemExit(1)
+          print('No new ShellCheck diagnostics relative to branch baseline')
+          PY
           fi
 
       - name: Commit validated implementation
