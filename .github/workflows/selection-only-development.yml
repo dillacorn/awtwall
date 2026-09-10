@@ -51,11 +51,17 @@ jobs:
         shell: bash
         run: git diff --check
 
-      - name: Validate ShellCheck delta
+      - name: ShellCheck focused regression
         shell: bash
         run: |
           if command -v shellcheck >/dev/null 2>&1; then
             shellcheck tests/test-selection-only.sh
+          fi
+
+      - name: ShellCheck app delta
+        shell: bash
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
             shellcheck -f json awtwall > /tmp/shellcheck-after.json || true
             python3 - <<'PY'
           import collections
