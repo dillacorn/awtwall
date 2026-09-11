@@ -56,3 +56,18 @@ Do not claim runtime wallpaper, compositor, preview, or terminal UI behavior is 
 - When uninstall behavior changes, update `UNINSTALL.md` and `awtwall-installer` together.
 - Release notes should link to the canonical install, update, and uninstall guides rather than duplicating long command sections.
 - Release notes must describe only behavior actually present in the tagged release. Do not move a tag just to pick up later documentation changes unless explicitly instructed.
+
+### Editing an existing published release body
+
+If the exact GitHub release must be edited but the connected GitHub tool does not expose a direct Release write action, do not stop at that connector limitation and do not substitute `README.md`, another ref, or a recreated tag. Use the proven one-use GitHub Actions release bridge pattern.
+
+- Start from the current `main` commit on a temporary helper branch. Do not merge the helper branch merely to edit release notes.
+- Add a narrowly guarded one-use job to an existing PR-triggered workflow on that helper branch, then open a specifically named temporary PR to trigger it. Keep the job conditional on the exact PR title/head branch and same-repository source.
+- Give only that job `permissions: contents: write`; keep repository-wide workflow permissions unchanged.
+- Before writing, use `gh release view` and record the exact release name, target, draft/prerelease state, and exact tag SHA.
+- Generate the intended body from the currently published body so unrelated release-note sections are preserved.
+- Update only the existing release body with `gh release edit <tag> --notes-file <file>`. Never recreate, delete, or move the tag/release just to change notes.
+- Immediately re-read the complete published body with `gh release view`, compare it to the intended body, and verify the tag SHA and release metadata are unchanged.
+- Keep temporary workflow YAML valid. For generated multiline text inside `run: |`, use an indentation-safe heredoc or escaped strings.
+- Close the temporary PR after verification. Delete the temporary helper branch/workflow machinery only when branch deletion is explicitly authorized.
+- If a direct authenticated Release update action is available in the current tool surface, prefer it over the temporary bridge.
