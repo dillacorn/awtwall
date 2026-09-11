@@ -83,3 +83,5 @@ awtwall --version
 ```
 
 For normal upgrades, see [UPDATE.md](UPDATE.md).
+
+For removal instructions, see [UNINSTALL.md](UNINSTALL.md).

@@ -70,3 +70,5 @@ For a default manual installation, it is normally:
 ```
 
 For fresh installation instructions, see [INSTALL.md](INSTALL.md).
+
+For removal instructions, see [UNINSTALL.md](UNINSTALL.md).
