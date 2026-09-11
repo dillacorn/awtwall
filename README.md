@@ -2,7 +2,7 @@
 
 awtwall is a fast TUI wallpaper picker for Wayland with image previews, saved settings, live monitor layouts, and keyboard-first controls.
 
-It supports still images, GIFs, and MP4 wallpapers through `swww` / `awww`, `hyprpaper`, or `mpvpaper`.
+It supports still images, GIFs, and MP4 wallpapers through `awww` / `swww`, `hyprpaper`, or `mpvpaper`.
 
 <img src="./awtwall_preview.gif" alt="awtwall wallpaper picker preview" width="700">
 
@@ -10,11 +10,11 @@ It supports still images, GIFs, and MP4 wallpapers through `swww` / `awww`, `hyp
 
 - Fast terminal wallpaper browser
 - Keyboard-first workflow with mouse support
-- Numbered selection menus instead of blind option cycling
+- Numbered selection menus
 - Live monitor-layout view with focused-display detection
 - Hyprland, Sway, and niri display discovery
 - Image previews with `kitty`, `img2sixel`, `chafa`, or ImageMagick with SIXEL support
-- Still-image and GIF support through `swww` / `awww`
+- Still-image and GIF support through `awww` / `swww`
 - Still-image support through `hyprpaper`
 - MP4 wallpaper support through `mpvpaper`
 - Per-output wallpaper state and restore support
@@ -22,85 +22,15 @@ It supports still images, GIFs, and MP4 wallpapers through `swww` / `awww`, `hyp
 - Media filtering for images, GIFs, and MP4s
 - Random wallpaper actions for focused or multiple displays
 - Optional post-apply command hook
+- Selection-only picker mode for external consumers without changing the desktop wallpaper
 - Built-in version check
 
-## Version 2.1.1
+## Install and update
 
-Version 2.1.1 includes the new interactive selection menus and fixes same-key menu toggling.
+See the canonical guides:
 
-- Arrow-key, number-key, and mouse selection
-- `Enter`, `Space`, or mouse click to confirm
-- Press the same setting key again to close its menu
-- `Escape`, `q`, or `Q` to cancel without changing the setting
-- Live visual monitor layouts for Hyprland, Sway, and niri
-- Output-name fallback through `awww` / `swww` when compositor geometry is unavailable
-- More reliable Enter handling across terminal input modes
-
-## Requirements
-
-Required:
-
-- `bash`
-- `imagemagick`
-- `ncurses`
-
-Preview support requires at least one of:
-
-- `chafa`
-- `libsixel` for `img2sixel`
-- ImageMagick built with SIXEL support
-- `kitty` for kitty image previews
-
-Preview rendering can be disabled with `--no-sixel`.
-
-Install at least one wallpaper backend:
-
-- `awww` or `swww`
-- `hyprpaper` with Hyprland
-- `mpvpaper`
-
-Optional:
-
-- `jq` for reliable monitor detection and live layout geometry
-- `ffmpeg` for better MP4 thumbnail extraction
-- `xdg-utils` to open the wallpaper directory from awtwall
-- `kitty` for kitty image previews
-- `curl` or `wget` for release-version checks
-
-Live compositor discovery supports:
-
-- Hyprland through `hyprctl`
-- Sway through `swaymsg`
-- niri through `niri msg`
-
-If compositor geometry is unavailable, awtwall falls back to output names reported by `awww` / `swww`.
-
-## Install
-
-### Arch Linux / AUR
-
-```bash
-paru -S awtwall
-# or
-yay -S awtwall
-```
-
-### Manual
-
-```bash
-git clone https://github.com/dillacorn/awtwall
-cd awtwall
-chmod +x awtwall-installer
-./awtwall-installer
-```
-
-The manual installer places awtwall in `~/.local/bin` by default and installs `awtwall-update` when it is available.
-
-Run it with:
-
-```bash
-awtwall
-```
+- [INSTALL.md](INSTALL.md) for AUR and manual installation
+- [UPDATE.md](UPDATE.md) for AUR and manual updates
 
 ## Usage
 
@@ -133,6 +63,8 @@ awtwall --restore
 --force-encoder NAME    chafa | img2sixel | magick | kitty
 --post-exec CMD         Run CMD after each successful wallpaper apply
 --no-post-exec          Disable the saved post-exec hook
+--select-only           Browse and select without applying wallpaper
+--select-result PATH    Write the selected absolute path to PATH
 -h, --help              Show help
 -v, --version           Print version and check latest release
 --resume                Start at last saved selection
@@ -159,15 +91,22 @@ awtwall --random-current
 awtwall --random-all
 awtwall --random-all-different
 awtwall --random --no-mpvpaper
-awtwall --random-current --no-mpvpaper
-awtwall --random-all --no-mpvpaper
-awtwall --random-all-different --no-mpvpaper
 awtwall --post-exec 'notify-send "Wallpaper changed" "$AWTWALL_FILE"'
+awtwall --select-only --type images
+awtwall --select-only --type images --select-result /tmp/awtwall-selection
 ```
+
+## Selection-only mode
+
+`--select-only` turns awtwall into a pure picker for external consumers. Selecting an image returns the chosen local path without applying it as the desktop wallpaper or mutating normal wallpaper/backend state.
+
+Use `--select-result PATH` when another application needs a machine-consumable result file.
+
+Mouse click, `Space`, or `Enter` accepts the current item. `Escape`, `q`, or `Q` cancels without returning a selection.
 
 ## Preview backends
 
-awtwall supports these preview methods:
+awtwall supports:
 
 - `kitty`
 - `img2sixel`
@@ -177,25 +116,17 @@ awtwall supports these preview methods:
 
 ## Wallpaper backends
 
-### `swww` / `awww`
+### `awww` / `swww`
 
-Best for still-image and GIF wallpapers with transition support.
-
-awtwall prioritizes `awww` over `swww` when both are available.
-
-If either `awww` or `swww` is available, awtwall prefers it over `hyprpaper` for still images.
+Best for still-image and GIF wallpapers with transition support. awtwall prioritizes `awww` when both are available.
 
 ### `hyprpaper`
 
-Still-image backend for Hyprland.
-
-If `awww` / `swww` is unavailable, awtwall can fall back to `hyprpaper` for still images.
+Still-image backend for Hyprland. If `awww` / `swww` is unavailable, awtwall can fall back to `hyprpaper` for still images.
 
 ### `mpvpaper`
 
-Used for `.mp4` video wallpapers.
-
-If `mpvpaper` is selected for a still image, awtwall falls back to an available still-image backend.
+Used for `.mp4` video wallpapers. If `mpvpaper` is selected for a still image, awtwall falls back to an available still-image backend.
 
 ## Controls
 
@@ -217,12 +148,14 @@ If `mpvpaper` is selected for a still image, awtwall falls back to an available 
 - `v` or `V` to view version information
 - `q` or `Q` to quit
 
+In selection-only mode, `Space`, `Enter`, or mouse click accepts the current item instead of applying it.
+
 ### Setting menus
 
 - `b` selects the wallpaper backend
 - `e` selects the media filter
 - `m` or `M` selects the display target and shows the live monitor layout
-- `z` selects the `swww` / `awww` resize mode
+- `z` selects the `awww` / `swww` resize mode
 - `t` selects the transition type
 - `d` selects the transition duration
 - `p` selects the transition FPS
@@ -234,19 +167,14 @@ Inside a setting menu:
 - Arrow keys or `h`, `j`, `k`, `l` move the selection
 - Number keys select a visible option directly
 - `Enter`, `Space`, or mouse click confirms
-- Pressing the same setting key again closes the menu
+- Pressing the same setting key again closes its menu
 - `Escape`, `q`, or `Q` cancels and returns
+
+Backend/display controls are intentionally unavailable in selection-only mode.
 
 ## Display selector
 
-The display selector shows a scaled view of the compositor's live output layout and a numbered list containing each output's:
-
-- Connector name
-- Resolution and refresh rate
-- Layout coordinates
-- Focused state
-
-The diagram is a compact topology view. The numbered list is the authoritative display information when complex layouts must be compressed to fit the terminal.
+The display selector shows a scaled view of the compositor's live output layout and a numbered list containing each output's connector name, resolution, refresh rate, layout coordinates, and focused state.
 
 awtwall reads live compositor state only. It does not modify compositor monitor configuration files.
 
@@ -266,35 +194,26 @@ awtwall stores data in:
 ~/.cache/awtwall/
 ```
 
-This includes:
+This includes saved UI state, per-output wallpaper/backend state, thumbnail and preview cache, and debug logs.
 
-- Saved UI state
-- Per-output backend and wallpaper state
-- Thumbnail and preview cache
-- Debug logs
+Selection-only mode does not persist normal wallpaper application state.
 
-## Version and updates
+## Version
 
 ```bash
 awtwall -v
 awtwall --version
 ```
 
-AUR installations should be updated through the installed AUR helper.
-
-Manual installations created with `awtwall-installer` can use:
-
-```bash
-awtwall-update
-```
+For upgrade instructions, see [UPDATE.md](UPDATE.md).
 
 ## License
 
-This project is licensed under the [MIT License](https://github.com/dillacorn/awtwall/blob/main/LICENSE).
+This project is licensed under the [MIT License](LICENSE).
 
 ### Legal Notice
 
-This project is a general-purpose open-source utility that runs locally on the user's system. It does not provide a hosted service and does not collect user data. Users are responsible for complying with laws and regulations in their own jurisdiction when using this software.
+This project is a general-purpose open-source utility that runs locally. It does not provide a hosted service and does not collect user data. Users are responsible for complying with laws and regulations in their own jurisdiction when using this software.
 
 ## Donate
 
