@@ -25,12 +25,13 @@ It supports still images, GIFs, and MP4 wallpapers through `awww` / `swww`, `hyp
 - Selection-only picker mode for external consumers without changing the desktop wallpaper
 - Built-in version check
 
-## Install and update
+## Install, update, and uninstall
 
 See the canonical guides:
 
 - [INSTALL.md](INSTALL.md) for AUR and manual installation
 - [UPDATE.md](UPDATE.md) for AUR and manual updates
+- [UNINSTALL.md](UNINSTALL.md) for AUR and manual removal
 
 ## Usage
 
