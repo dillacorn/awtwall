@@ -1,0 +1,32 @@
+name: Validate selection-only picker
+
+on:
+  push:
+    branches:
+      - feature/select-only-picker
+    paths:
+      - awtwall
+      - tests/test-select-only.sh
+      - tests/test-select-only-runtime.sh
+      - .github/workflows/test-select-only.yml
+  pull_request:
+    paths:
+      - awtwall
+      - tests/test-select-only.sh
+      - tests/test-select-only-runtime.sh
+      - .github/workflows/test-select-only.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax
+        run: bash -n awtwall tests/test-select-only.sh tests/test-select-only-runtime.sh
+      - name: Selection-only contract
+        run: |
+          bash tests/test-select-only.sh
+          bash tests/test-select-only-runtime.sh

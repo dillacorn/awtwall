@@ -30,7 +30,7 @@ APP_NAME="awtwall"
 APP_ID="awtwall"
 
 # AWTWALL_VERSION_BLOCK_BEGIN
-AWTWALL_VERSION="${AWTWALL_VERSION:-v2.1.2}"  # bump for releases
+AWTWALL_VERSION="${AWTWALL_VERSION:-v2.2.0}"  # bump for releases
 AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
@@ -264,6 +264,10 @@ POST_EXEC_CMD=""             # persisted command run by bash -lc with AWTWALL_* 
 RANDOM_ACTION=""            # "" | current | all-same | all-different
 RANDOM_ALLOW_MPV=1          # 1=allow mpvpaper for random CLI actions
 FILTER_KIND_WAS_SET_BY_ARG=0  # 1 when --type was explicitly passed on the CLI
+SELECT_ONLY=0                 # 1=return a selected path without applying wallpaper
+SELECT_ONLY_RESULT_FILE=""    # optional file used by detached external consumers
+DISPLAY_SELECTOR_ENABLED=1    # disabled in selection-only mode
+POST_EXEC_ALLOWED=1           # disabled in selection-only mode
 DISPLAY_SOURCE=""
 DISPLAY_FOCUSED=""
 DISPLAY_LAYOUT_AVAILABLE=0
@@ -1210,7 +1214,7 @@ check_runtime_requirements() {
     fi
   done
 
-  if ! ensure_backend_available; then
+  if (( SELECT_ONLY == 0 )) && ! ensure_backend_available; then
     missing_cmds+=("install at least one wallpaper backend:")
     missing_cmds+=("awww-bin or awww-git (preferred), or swww")
     missing_cmds+=("hyprpaper + hyprctl (package: hyprland)")
@@ -1286,7 +1290,7 @@ check_noninteractive_requirements() {
     fi
   done
 
-  if ! ensure_backend_available; then
+  if (( SELECT_ONLY == 0 )) && ! ensure_backend_available; then
     missing_cmds+=("install at least one wallpaper backend:")
     missing_cmds+=("awww-bin or awww-git (preferred), or swww")
     missing_cmds+=("hyprpaper + hyprctl (package: hyprland)")
@@ -1751,6 +1755,10 @@ refresh_display_choices() {
   DISPLAY_SOURCE=""
   DISPLAY_FOCUSED=""
   DISPLAY_LAYOUT_AVAILABLE=0
+  if (( DISPLAY_SELECTOR_ENABLED == 0 )); then
+    DISPLAY_TARGET="All displays"
+    return 0
+  fi
 
   discover_hyprland_displays ||
     discover_sway_displays ||
@@ -2272,10 +2280,34 @@ apply_path() {
   return "$rc"
 }
 
+select_only_accept() {
+  local img="$1" result_dir
+  [[ -n "$img" && "$img" == /* && -f "$img" ]] || {
+    msg "Selected file is not a readable local wallpaper"
+    return 1
+  }
+  if [[ -n "$SELECT_ONLY_RESULT_FILE" ]]; then
+    result_dir="$(dirname -- "$SELECT_ONLY_RESULT_FILE")"
+    mkdir -p -- "$result_dir" || return 1
+    ( umask 077; printf '%s\n' "$img" >"$SELECT_ONLY_RESULT_FILE" ) || return 1
+  else
+    printf '%s\n' "$img"
+  fi
+  RUNNING=0
+  return 0
+}
+
 apply_selected() {
   local img
-  if (( ${#FILES[@]} == 0 )); then msg "No wallpapers to apply"; return 1; fi
+  if (( ${#FILES[@]} == 0 )); then
+    if (( SELECT_ONLY == 1 )); then msg "No wallpapers to select"; else msg "No wallpapers to apply"; fi
+    return 1
+  fi
   img="${FILES[$SEL]}"
+  if (( SELECT_ONLY == 1 )); then
+    select_only_accept "$img"
+    return $?
+  fi
   apply_path "$img"
 }
 
@@ -2698,6 +2730,9 @@ restore_saved_wallpapers() {
 
 # ---------- persistence ----------
 save_state() {
+  if (( SELECT_ONLY == 1 )); then
+    return 0
+  fi
   mkdir -p -- "$CONFIG_DIR"
   {
     printf 'WALL_DIR=%q\n' "$WALL_DIR"
@@ -2730,7 +2765,9 @@ load_state() {
 
   [[ -d "$WALL_DIR" ]] || WALL_DIR="$DEFAULT_WALL_DIR"
   [[ "$RECURSIVE" =~ ^[01]$ ]] || RECURSIVE=1
-  if normalized_backend="$(normalize_backend_name "${BACKEND:-}" 2>/dev/null)"; then
+  if (( SELECT_ONLY == 1 )); then
+    BACKEND="${BACKEND:-swww}"
+  elif normalized_backend="$(normalize_backend_name "${BACKEND:-}" 2>/dev/null)"; then
     BACKEND="$normalized_backend"
   else
     BACKEND="$(default_still_backend)"
@@ -3028,18 +3065,31 @@ draw_status_bars() {
   local cols selected_idx status_tail backend_name swww_name
   cols="$(term_cols)"
   if (( ${#FILES[@]} > 0 )); then selected_idx=$(( SEL + 1 )); else selected_idx=0; fi
-  backend_name="$(backend_label)"
-  swww_name="$(swww_family_label)"
+  if (( SELECT_ONLY == 1 )); then
+    backend_name="selection-only"
+    swww_name=""
+  else
+    backend_name="$(backend_label)"
+    swww_name="$(swww_family_label)"
+  fi
 
   ui_goto 1 1; ui_clear_line; ui_bold
-  printf '%-*.*s' "$cols" "$cols"     " ${APP_NAME} backend=${backend_name} display=${DISPLAY_TARGET} encoder=${SIXEL_ENCODER_LABEL} "
+  if (( SELECT_ONLY == 1 )); then
+    printf '%-*.*s' "$cols" "$cols" " ${APP_NAME} selection-only encoder=${SIXEL_ENCODER_LABEL} "
+  else
+    printf '%-*.*s' "$cols" "$cols" " ${APP_NAME} backend=${backend_name} display=${DISPLAY_TARGET} encoder=${SIXEL_ENCODER_LABEL} "
+  fi
   ui_color_reset
 
   ui_goto 2 1; ui_clear_line
   printf '%-*.*s' "$cols" "$cols"     " dir=$(short_path "$WALL_DIR" 60) recursive=${RECURSIVE} type=${FILTER_KIND} find='$(sanitize_text "$FILTER_QUERY")' "
 
   ui_goto 3 1; ui_clear_line; ui_dim
-  printf '%-*.*s' "$cols" "$cols"     " ${swww_name}: resize=${SWWW_RESIZE} trans=${SWWW_TRANSITION_TYPE} dur=${SWWW_TRANSITION_DURATION}s fps=${SWWW_TRANSITION_FPS} interp=${SWWW_FILTER} | hyprpaper: ${HYPERPAPER_MODE} | mpvpaper: mp4 | post-exec: $(post_exec_label) "
+  if (( SELECT_ONLY == 1 )); then
+    printf '%-*.*s' "$cols" "$cols" " Choose an image with click, Space, or Enter. Escape/q cancels. "
+  else
+    printf '%-*.*s' "$cols" "$cols" " ${swww_name}: resize=${SWWW_RESIZE} trans=${SWWW_TRANSITION_TYPE} dur=${SWWW_TRANSITION_DURATION}s fps=${SWWW_TRANSITION_FPS} interp=${SWWW_FILTER} | hyprpaper: ${HYPERPAPER_MODE} | mpvpaper: mp4 | post-exec: $(post_exec_label) "
+  fi
   ui_color_reset
 
   status_tail="$(sanitize_text "$STATUS_MSG")"
@@ -3413,6 +3463,7 @@ handle_mouse_event() {
   fi
 
   apply_selected || true
+  (( RUNNING == 0 )) && return 0
   drain_pending_keys 256 || true
   draw_status_bars
   return 0
@@ -3904,6 +3955,7 @@ move_sel_grid() {
 }
 
 choose_backend() {
+  (( SELECT_ONLY == 0 )) || return 0
   local backend
   local -a values=() labels=()
 
@@ -3957,6 +4009,7 @@ choose_filter_kind() {
 }
 
 choose_display() {
+  (( DISPLAY_SELECTOR_ENABLED == 1 )) || return 0
   refresh_display_choices
   if ! option_menu "Select display target" "$DISPLAY_TARGET" DISPLAY_CHOICES DISPLAY_LABELS 1 mM; then
     msg "Display unchanged: $DISPLAY_TARGET"
@@ -4101,6 +4154,7 @@ purge_preview_cache() {
 }
 
 do_post_exec_prompt() {
+  (( POST_EXEC_ALLOWED == 1 )) || return 0
   local v current
 
   current="${POST_EXEC_CMD:-off}"
@@ -4224,6 +4278,8 @@ Options:
   --force-encoder NAME    chafa | img2sixel | magick | kitty
   --post-exec CMD         Run CMD after each successful wallpaper apply
   --no-post-exec          Disable the saved post-exec hook
+  --select-only           Select a file and exit without applying wallpaper
+  --select-result PATH    Write the selected absolute path to PATH
   -h, --help              Show help
   -v, --version           Print version and check latest release
   --resume                Start at last saved selection
@@ -4311,6 +4367,17 @@ parse_args() {
         POST_EXEC_ENABLED=0
         shift
         ;;
+      --select-only)
+        SELECT_ONLY=1
+        DISPLAY_SELECTOR_ENABLED=0
+        POST_EXEC_ALLOWED=0
+        shift
+        ;;
+      --select-result)
+        [[ $# -ge 2 ]] || die "Missing value for $1"
+        SELECT_ONLY_RESULT_FILE="$2"
+        shift 2
+        ;;
       --resume)
         RESUME_LAST=1
         shift
@@ -4342,6 +4409,15 @@ main() {
   local key prev_sel moved
 
   : > "$DEBUG_LOG"
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == "--select-only" ]]; then
+      SELECT_ONLY=1
+      DISPLAY_SELECTOR_ENABLED=0
+      POST_EXEC_ALLOWED=0
+      break
+    fi
+  done
   load_state
   parse_args "$@"
 
@@ -4417,12 +4493,14 @@ main() {
         ;;
       ' ')
         apply_selected || true
+        (( RUNNING == 0 )) && continue
         drain_pending_keys
         draw_status_bars
         ;;
       $'\n'|$'\r')
         # Keep support but do not advertise it because terminal may not emit it reliably.
         apply_selected || true
+        (( RUNNING == 0 )) && continue
         drain_pending_keys
         draw_status_bars
         ;;
@@ -4489,13 +4567,13 @@ main() {
         choose_filter_kind
         ;;
       b)
-        choose_backend
+        (( SELECT_ONLY == 0 )) && choose_backend
         ;;
       m|M)
-        choose_display
+        (( DISPLAY_SELECTOR_ENABLED == 1 )) && choose_display
         ;;
       E)
-        do_post_exec_prompt
+        (( POST_EXEC_ALLOWED == 1 )) && do_post_exec_prompt
         ;;
       z)
         choose_swww_resize
