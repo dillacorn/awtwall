@@ -30,3 +30,75 @@ jobs:
         run: |
           bash tests/test-select-only.sh
           bash tests/test-select-only-runtime.sh
+
+  release-notes-bridge:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.title == 'Temporary: update awtwall 2.2.0 release notes' &&
+      github.head_ref == 'ops/release-bridge-2.2.0-uninstall-notes' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: 2.2.0
+      EXPECTED_NAME: awtwall v2.2.0
+      EXPECTED_TARGET: 330ca9ac5ccd523d91b5e42fe128081c449b4b1a
+      EXPECTED_TAG_SHA: 330ca9ac5ccd523d91b5e42fe128081c449b4b1a
+    steps:
+      - name: Verify exact release target
+        run: |
+          set -euo pipefail
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json name --jq .name)" = "$EXPECTED_NAME"
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)" = "$RELEASE_TAG"
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)" = "$EXPECTED_TARGET"
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "false"
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)" = "false"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha)" = "$EXPECTED_TAG_SHA"
+
+      - name: Update release body only
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/awtwall-2.2.0-release.md"
+          cat > "$notes" <<'EOF'
+          # awtwall v2.2.0
+
+          This release adds a dedicated selection-only picker mode for external consumers while keeping normal wallpaper application behavior unchanged.
+
+          ## Install, update, and uninstall
+
+          - [Install awtwall](https://github.com/dillacorn/awtwall/blob/main/INSTALL.md)
+          - [Update awtwall](https://github.com/dillacorn/awtwall/blob/main/UPDATE.md)
+          - [Uninstall awtwall](https://github.com/dillacorn/awtwall/blob/main/UNINSTALL.md)
+
+          ## What is new
+
+          - Add `--select-only` to browse and choose an image without applying it as the desktop wallpaper.
+          - Add `--select-result PATH` for machine-consumable exact-path handoff to another application.
+          - Mouse click, Space, or Enter accepts the selected image and closes immediately.
+          - Selection-only mode suppresses display targeting, wallpaper backend requirements, post-exec hooks, and normal applied-wallpaper state changes.
+          - Add focused regression coverage for exact-path results and isolation from wallpaper application/persistence paths.
+
+          ## Validation
+
+          - Bash syntax and selection-only contract/runtime-isolation regressions passed on the release source.
+          - The picker was runtime-tested through Awtarchy lockscreen editor, including successful selection and return to the editor without changing the desktop wallpaper.
+
+          Full changes: https://github.com/dillacorn/awtwall/pull/4
+          EOF
+          sed -i 's/^          //' "$notes"
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$notes"
+
+      - name: Verify published release and unchanged metadata
+        run: |
+          set -euo pipefail
+          intended="$RUNNER_TEMP/awtwall-2.2.0-release.md"
+          published="$RUNNER_TEMP/published.md"
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$published"
+          diff -u "$intended" "$published"
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json name --jq .name)" = "$EXPECTED_NAME"
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)" = "$EXPECTED_TARGET"
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "false"
+          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)" = "false"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha)" = "$EXPECTED_TAG_SHA"
