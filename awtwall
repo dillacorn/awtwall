@@ -2665,13 +2665,43 @@ restore_apply_mpvpaper_map() {
 }
 
 restore_apply_saved_map() {
-  local out img saved_backend ext entry restored=0 skipped=0
+  local out img saved_backend ext entry restored=0 skipped=0 ignored_other=0
+  local only_umbriel=0 umbriel_json="" umbriel_listing=""
   local -a swww_entries=() hypr_entries=() mpv_entries=()
+  local -A umbriel_outputs=()
+
+  # Backend state is shared across compositors. Do not attempt to restore
+  # disconnected outputs or output names owned by another compositor.
+  # Never delete those saved entries.
+  if is_umbriel_session; then
+    only_umbriel=1
+    if ! have umbriel || ! have jq; then
+      die "Umbriel restore requires umbriel and jq for output discovery."
+    fi
+    umbriel_json="$(umbriel outputs --json 2>/dev/null)" ||
+      die "Could not query Umbriel outputs; refusing wallpaper restore."
+    umbriel_listing="$(jq -er '
+      if type != "array" then error("Expected Umbriel outputs array")
+      else
+        [ .[] | select(.enabled == true)
+          | .name | select(type == "string" and length > 0) ]
+        | if length > 0 then .[] else error("No enabled Umbriel outputs") end
+      end
+    ' <<<"$umbriel_json" 2>/dev/null)" ||
+      die "Could not identify enabled Umbriel outputs; refusing wallpaper restore."
+    while IFS= read -r out; do
+      umbriel_outputs["$out"]=1
+    done <<<"$umbriel_listing"
+  fi
 
   backend_state_read
   (( ${#BACKEND_STATE_MAP[@]} > 0 )) || return 1
 
   for out in "${!BACKEND_STATE_MAP[@]}"; do
+    if (( only_umbriel == 1 )) && [[ -z "${umbriel_outputs[$out]:-}" ]]; then
+      (( ignored_other++ ))
+      continue
+    fi
     img="${BACKEND_STATE_MAP[$out]}"
     if [[ -z "$img" || ! -f "$img" ]]; then
       (( skipped++ ))
@@ -2746,6 +2776,8 @@ restore_apply_saved_map() {
 
   (( restored > 0 )) || return 1
   printf 'awtwall: restored %s wallpaper(s)\n' "$restored"
+  (( ignored_other > 0 )) &&
+    printf 'awtwall: ignored %s saved output(s) not enabled in Umbriel\n' "$ignored_other" >&2
   (( skipped > 0 )) && printf 'awtwall: skipped %s saved wallpaper(s)\n' "$skipped" >&2
   return 0
 }
