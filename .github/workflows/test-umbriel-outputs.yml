@@ -1,0 +1,33 @@
+name: Validate Umbriel display support
+
+on:
+  push:
+    branches:
+      - feature/umbriel-output-support
+    paths:
+      - awtwall
+      - tests/test-umbriel-outputs.sh
+      - .github/workflows/test-umbriel-outputs.yml
+  pull_request:
+    paths:
+      - awtwall
+      - tests/test-umbriel-outputs.sh
+      - .github/workflows/test-umbriel-outputs.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure jq is available
+        run: command -v jq || sudo apt-get update && sudo apt-get install -y jq
+      - name: Bash syntax
+        run: bash -n awtwall tests/*.sh
+      - name: Display, backend, and selection regressions
+        run: |
+          bash tests/test-umbriel-outputs.sh
+          bash tests/test-select-only.sh
+          bash tests/test-select-only-runtime.sh
