@@ -12,7 +12,7 @@ It supports still images, GIFs, and MP4 wallpapers through `awww` / `swww`, `hyp
 - Keyboard-first workflow with mouse support
 - Numbered selection menus
 - Live monitor-layout view with focused-display detection
-- Hyprland, Sway, and niri display discovery
+- Hyprland, Sway, niri, and Umbriel display discovery
 - Image previews with `kitty`, `img2sixel`, `chafa`, or ImageMagick with SIXEL support
 - Still-image and GIF support through `awww` / `swww`
 - Still-image support through `hyprpaper`
@@ -177,7 +177,7 @@ Backend/display controls are intentionally unavailable in selection-only mode.
 
 The display selector shows a scaled view of the compositor's live output layout and a numbered list containing each output's connector name, resolution, refresh rate, layout coordinates, and focused state.
 
-awtwall reads live compositor state only. It does not modify compositor monitor configuration files.
+awtwall reads live compositor state only. Umbriel uses `umbriel outputs --json` for enabled monitors, current modes, logical layout, and focused-output detection. It does not modify compositor monitor configuration files.
 
 ## Defaults
 
