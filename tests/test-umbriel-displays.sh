@@ -93,4 +93,7 @@ UMBRIEL_SOCKET=""
 if awtwall_is_umbriel_session; then fail "Hyprland misidentified as Umbriel"; fi
 UMBRIEL_SOCKET="/tmp/mock-umbriel-socket"
 awtwall_is_umbriel_session || fail "Umbriel socket hint not detected"
+UMBRIEL_SOCKET=""
+unset XDG_CURRENT_DESKTOP
+if awtwall_is_umbriel_session; then fail "Unset desktop misidentified as Umbriel"; fi
 printf 'PASS: Umbriel output discovery, focus, and targeting\n'
