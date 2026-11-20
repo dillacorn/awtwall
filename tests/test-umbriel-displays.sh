@@ -23,7 +23,7 @@ extract() {
   ' "$APP"
 }
 
-for fn in display_choice_add discover_umbriel_displays refresh_display_choices \
+for fn in display_choice_add is_umbriel_session discover_umbriel_displays refresh_display_choices \
           focused_output_name resolve_target_outputs; do
   body="$(extract "$fn")"
   [[ -n "$body" ]] || fail "missing $fn"
@@ -95,6 +95,15 @@ XDG_CURRENT_DESKTOP=Hyprland
 if discover_umbriel_displays; then
   fail "Umbriel intercepted a non-Umbriel session"
 fi
+
+unset XDG_CURRENT_DESKTOP
+if is_umbriel_session || discover_umbriel_displays; then
+  fail "unset desktop incorrectly identified as Umbriel"
+fi
+
+XDG_CURRENT_DESKTOP=Umbriel
+[[ "$(is_umbriel_session && printf yes)" == yes ]] ||
+  fail "mixed-case Umbriel desktop not recognized"
 
 XDG_CURRENT_DESKTOP=umbriel
 MOCK_OUTPUTS='[]'
