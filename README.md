@@ -12,7 +12,7 @@ It supports still images, GIFs, and MP4 wallpapers through `awww` / `swww`, `hyp
 - Keyboard-first workflow with mouse support
 - Numbered selection menus
 - Live monitor-layout view with focused-display detection
-- Hyprland, Sway, and niri display discovery
+- Hyprland, Sway, Umbriel, and niri display discovery
 - Image previews with `kitty`, `img2sixel`, `chafa`, or ImageMagick with SIXEL support
 - Still-image and GIF support through `awww` / `swww`
 - Still-image support through `hyprpaper`
@@ -123,7 +123,7 @@ Best for still-image and GIF wallpapers with transition support. awtwall priorit
 
 ### `hyprpaper`
 
-Still-image backend for Hyprland. If `awww` / `swww` is unavailable, awtwall can fall back to `hyprpaper` for still images.
+Still-image backend for Hyprland only. The `awww` / `swww` backend is used in Umbriel, Sway and niri, including when restoring images previously saved with `hyprpaper` under Hyprland. Existing Hyprland backend preferences remain available.
 
 ### `mpvpaper`
 
