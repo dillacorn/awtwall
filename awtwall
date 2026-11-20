@@ -30,7 +30,7 @@ APP_NAME="awtwall"
 APP_ID="awtwall"
 
 # AWTWALL_VERSION_BLOCK_BEGIN
-AWTWALL_VERSION="${AWTWALL_VERSION:-v2.2.0}"  # bump for releases
+AWTWALL_VERSION="${AWTWALL_VERSION:-v2.2.1}"  # bump for releases
 AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
@@ -1299,14 +1299,16 @@ check_noninteractive_requirements() {
   fi
 
   if [[ "$RANDOM_ACTION" == "current" ]]; then
-    if have hyprctl; then
+    if [[ "${XDG_CURRENT_DESKTOP,,}" == "umbriel" ]] && have umbriel && have jq; then
+      :
+    elif have hyprctl; then
       :
     elif have swaymsg && have jq; then
       :
     elif have niri && have jq; then
       :
     else
-      missing_cmds+=("hyprctl, swaymsg + jq, or niri + jq (needed to detect the focused monitor)")
+      missing_cmds+=("umbriel + jq, hyprctl, swaymsg + jq, or niri + jq (needed to detect the focused monitor)")
       missing=1
     fi
   fi
@@ -1644,6 +1646,60 @@ discover_hyprland_displays() {
   return 1
 }
 
+
+# Query Umbriel directly; installing its CLI must not change discovery in
+# another active compositor. Keep powered-off (DPMS) but enabled outputs.
+discover_umbriel_displays() {
+  local json name width height refresh x y logical_w logical_h focused label
+  local before=${#DISPLAY_CHOICES[@]}
+  [[ "${XDG_CURRENT_DESKTOP,,}" == "umbriel" ]] || return 1
+  have umbriel && have jq || return 1
+
+  json="$(umbriel outputs --json 2>/dev/null)" || return 1
+  jq -e 'type == "array"' <<<"$json" >/dev/null 2>&1 || return 1
+
+  while IFS=$'\t' read -r name width height refresh x y logical_w logical_h focused; do
+    [[ -n "$name" ]] || continue
+    label="${name} - ${width}x${height}"
+    (( refresh > 0 )) && label+="@${refresh}Hz"
+    label+=" - pos ${x},${y}"
+    if [[ "$focused" == "true" ]]; then
+      label+=" - focused"
+      DISPLAY_FOCUSED="$name"
+    fi
+    display_choice_add "$name" "$label" "${x}:${y}:${logical_w}:${logical_h}"
+  done < <(
+    jq -r '
+      def metric($value; $name; $i):
+        if ($value | type) == "object" then $value[$name] // 0
+        elif ($value | type) == "array" then $value[$i] // 0
+        else 0 end;
+      .[]
+      | select(.enabled == true)
+      | (.modes // [] | map(select(.current == true)) | first // {}) as $mode
+      | (.scale // 1) as $scale
+      | metric(.position; "x"; 0) as $x
+      | metric(.position; "y"; 1) as $y
+      | metric(.logical_size; "width"; 0) as $width
+      | metric(.logical_size; "height"; 1) as $height
+      | [
+          (.name // ""),
+          ($mode.width // (($width * $scale) | round)),
+          ($mode.height // (($height * $scale) | round)),
+          ((($mode.refresh_mhz // 0) / 1000) | round),
+          $x, $y, $width, $height, (.focused // false)
+        ]
+      | @tsv
+    ' <<<"$json" 2>/dev/null || true
+  )
+
+  if (( ${#DISPLAY_CHOICES[@]} > before )); then
+    DISPLAY_SOURCE="Umbriel"
+    return 0
+  fi
+  return 1
+}
+
 discover_sway_displays() {
   local json workspaces name width height refresh x y logical_w logical_h label
   local before=${#DISPLAY_CHOICES[@]}
@@ -1760,7 +1816,8 @@ refresh_display_choices() {
     return 0
   fi
 
-  discover_hyprland_displays ||
+  discover_umbriel_displays ||
+    discover_hyprland_displays ||
     discover_sway_displays ||
     discover_niri_displays ||
     discover_backend_displays || true
@@ -1784,6 +1841,16 @@ focused_output_name() {
   if [[ -n "${DISPLAY_FOCUSED:-}" ]]; then
     printf '%s\n' "$DISPLAY_FOCUSED"
     return 0
+  fi
+
+  if [[ "${XDG_CURRENT_DESKTOP,,}" == "umbriel" ]] && have umbriel && have jq; then
+    out="$(umbriel outputs --json 2>/dev/null |
+      jq -r '.[] | select(.enabled == true and .focused == true) | .name // empty' 2>/dev/null |
+      head -n1 || true)"
+    if [[ -n "$out" ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
   fi
 
   if have hyprctl && have jq; then
