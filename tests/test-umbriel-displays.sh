@@ -9,7 +9,7 @@ command -v jq >/dev/null 2>&1 || fail 'jq required for Umbriel output tests'
 extract_function() {
   awk -v fn="$1" '
     $0 == fn "() {" { inside=1 }
-    inside { print; if ($0 == "}") { done=1; break } }
+    inside { print; if ($0 == "}") { done=1; exit } }
     END { if (!done) { print "Missing function " fn > "/dev/stderr"; exit 1 } }
   ' "$APP"
 }
