@@ -1581,7 +1581,8 @@ ensure_thumb_assets() {
 
 # ---------- monitor / backend ----------
 awtwall_is_umbriel_session() {
-  case ":${XDG_CURRENT_DESKTOP,,}:" in
+  local desktop="${XDG_CURRENT_DESKTOP:-}"
+  case ":${desktop,,}:" in
     *:umbriel:*) return 0 ;;
   esac
   [[ -n "${UMBRIEL_SOCKET:-}" ]]
