@@ -2253,10 +2253,14 @@ apply_still_image() {
       if apply_with_swww "$img"; then
         return 0
       fi
-      msg "$(swww_family_label) failed, falling back to hyprpaper"
-      BACKEND="hyprpaper"
-      apply_with_hyprpaper "$img"
-      return $?
+      if backend_is_available hyprpaper; then
+        msg "$(swww_family_label) failed, falling back to hyprpaper"
+        BACKEND="hyprpaper"
+        apply_with_hyprpaper "$img"
+        return $?
+      fi
+      msg "$(swww_family_label) apply failed (no compatible fallback)"
+      return 1
       ;;
     hyprpaper)
       apply_with_hyprpaper "$img"
@@ -2699,7 +2703,17 @@ restore_apply_saved_map() {
         ;;
       hyprpaper)
         [[ "$ext" == "gif" || "$ext" == "mp4" ]] && { (( skipped++ )); continue; }
-        hypr_entries+=("${out}"$'\t'"${img}")
+        if awtwall_is_umbriel_session; then
+          # Preserve the saved Hyprland backend while displaying this image
+          # through a compatible Umbriel backend for this restore only.
+          if backend_is_available swww; then
+            swww_entries+=("${out}"$'\t'"${img}")
+          else
+            (( skipped++ ))
+          fi
+        else
+          hypr_entries+=("${out}"$'\t'"${img}")
+        fi
         ;;
       mpvpaper)
         [[ "$ext" != "mp4" ]] && { (( skipped++ )); continue; }
@@ -2772,6 +2786,10 @@ restore_last_applied_fallback() {
 
   ext="${img##*.}"
   ext="${ext,,}"
+
+  if awtwall_is_umbriel_session && [[ "$BACKEND" == "hyprpaper" ]]; then
+    BACKEND="$(default_still_backend)"
+  fi
 
   if [[ "$ext" == "mp4" ]]; then
     BACKEND="mpvpaper"
