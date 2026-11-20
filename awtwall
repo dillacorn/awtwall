@@ -1299,7 +1299,7 @@ check_noninteractive_requirements() {
   fi
 
   if [[ "$RANDOM_ACTION" == "current" ]]; then
-    if [[ "${XDG_CURRENT_DESKTOP,,}" == "umbriel" ]] && have umbriel && have jq; then
+    if is_umbriel_session && have umbriel && have jq; then
       :
     elif have hyprctl; then
       :
@@ -1647,12 +1647,17 @@ discover_hyprland_displays() {
 }
 
 
+is_umbriel_session() {
+  local desktop="${XDG_CURRENT_DESKTOP:-}"
+  [[ "${desktop,,}" == "umbriel" ]]
+}
+
 # Query Umbriel directly; installing its CLI must not change discovery in
 # another active compositor. Keep powered-off (DPMS) but enabled outputs.
 discover_umbriel_displays() {
   local json name width height refresh x y logical_w logical_h focused label
   local before=${#DISPLAY_CHOICES[@]}
-  [[ "${XDG_CURRENT_DESKTOP,,}" == "umbriel" ]] || return 1
+  is_umbriel_session || return 1
   have umbriel && have jq || return 1
 
   json="$(umbriel outputs --json 2>/dev/null)" || return 1
@@ -1843,7 +1848,7 @@ focused_output_name() {
     return 0
   fi
 
-  if [[ "${XDG_CURRENT_DESKTOP,,}" == "umbriel" ]] && have umbriel && have jq; then
+  if is_umbriel_session && have umbriel && have jq; then
     out="$(umbriel outputs --json 2>/dev/null |
       jq -r '.[] | select(.enabled == true and .focused == true) | .name // empty' 2>/dev/null |
       head -n1 || true)"
