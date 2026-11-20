@@ -318,6 +318,21 @@ post_exec_label() {
   fi
 }
 
+is_umbriel_session() {
+  case ":${XDG_CURRENT_DESKTOP,,}:" in
+    *:umbriel:*) return 0 ;;
+  esac
+  return 1
+}
+
+is_hyprland_session() {
+  is_umbriel_session && return 1
+  case ":${XDG_CURRENT_DESKTOP,,}:" in
+    *:hyprland:*) return 0 ;;
+  esac
+  [[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]
+}
+
 normalize_backend_name() {
   local backend="${1:-}"
   backend="${backend,,}"
@@ -464,7 +479,7 @@ have_swww_backend() {
 backend_is_available() {
   case "$1" in
     swww) have_swww_backend ;;
-    hyprpaper) have hyprpaper && have hyprctl ;;
+    hyprpaper) is_hyprland_session && have hyprpaper && have hyprctl ;;
     mpvpaper) have mpvpaper ;;
     *) return 1 ;;
   esac
@@ -1299,7 +1314,12 @@ check_noninteractive_requirements() {
   fi
 
   if [[ "$RANDOM_ACTION" == "current" ]]; then
-    if have hyprctl; then
+    if is_umbriel_session; then
+      if ! have umbriel || ! have jq; then
+        missing_cmds+=("umbriel + jq (needed for focused output in Umbriel)")
+        missing=1
+      fi
+    elif have hyprctl; then
       :
     elif have swaymsg && have jq; then
       :
@@ -1590,6 +1610,50 @@ display_choice_add() {
   return 0
 }
 
+discover_umbriel_displays() {
+  local json name width height refresh x y logical_w logical_h focused label
+  local before=${#DISPLAY_CHOICES[@]}
+  is_umbriel_session && have umbriel && have jq || return 1
+  json="$(umbriel outputs --json 2>/dev/null)" || return 1
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$json" || return 1
+
+  while IFS=$'\t' read -r name width height refresh x y logical_w logical_h focused; do
+    [[ -n "$name" ]] || continue
+    label="${name} - ${width}x${height}"
+    (( refresh > 0 )) && label+="@${refresh}Hz"
+    label+=" - pos ${x},${y}"
+    if [[ "$focused" == "true" ]]; then
+      DISPLAY_FOCUSED="$name"
+      label+=" - focused"
+    fi
+    display_choice_add "$name" "$label" "${x}:${y}:${logical_w}:${logical_h}"
+  done < <(
+    jq -r '
+      .[]
+      | select(.enabled == true)
+      | ([.modes[]? | select(.current == true)] | first // {}) as $mode
+      | [
+          (.name // ""),
+          ($mode.width // 0),
+          ($mode.height // 0),
+          ((($mode.refresh_mhz // 0) / 1000) | round),
+          (.position.x // 0),
+          (.position.y // 0),
+          (.logical_size.width // 0),
+          (.logical_size.height // 0),
+          (.focused // false)
+        ]
+      | @tsv
+    ' <<<"$json" 2>/dev/null || true
+  )
+
+  if (( ${#DISPLAY_CHOICES[@]} > before )); then
+    DISPLAY_SOURCE="Umbriel"
+    return 0
+  fi
+  return 1
+}
+
 discover_hyprland_displays() {
   local json name width height refresh x y logical_w logical_h focused label
   local before=${#DISPLAY_CHOICES[@]}
@@ -1760,10 +1824,15 @@ refresh_display_choices() {
     return 0
   fi
 
-  discover_hyprland_displays ||
-    discover_sway_displays ||
-    discover_niri_displays ||
-    discover_backend_displays || true
+  if is_umbriel_session; then
+    # Do not prefer installed Hyprland/Sway CLIs over Umbriel's live outputs.
+    discover_umbriel_displays || discover_backend_displays || true
+  else
+    discover_hyprland_displays ||
+      discover_sway_displays ||
+      discover_niri_displays ||
+      discover_backend_displays || true
+  fi
 
   for item in "${DISPLAY_CHOICES[@]}"; do
     if [[ "$item" == "$cur" ]]; then
@@ -1783,6 +1852,16 @@ focused_output_name() {
 
   if [[ -n "${DISPLAY_FOCUSED:-}" ]]; then
     printf '%s\n' "$DISPLAY_FOCUSED"
+    return 0
+  fi
+
+  if is_umbriel_session; then
+    have umbriel && have jq || return 1
+    out="$(umbriel outputs --json 2>/dev/null |
+        jq -r '.[] | select(.enabled == true and .focused == true) | .name // empty' |
+        head -n1 || true)"
+    [[ -n "$out" ]] || return 1
+    printf '%s\n' "$out"
     return 0
   fi
 
@@ -1988,7 +2067,7 @@ apply_with_swww() {
   resolve_target_outputs
   if (( ${#TARGET_OUTPUTS[@]} == 0 )); then msg "No outputs detected"; return 1; fi
 
-  if is_hyprpaper_running; then
+  if is_hyprland_session && is_hyprpaper_running; then
     if [[ "$DISPLAY_TARGET" == "All displays" ]]; then
       kill_hyprpaper_if_running
     else
@@ -2171,10 +2250,14 @@ apply_still_image() {
       if apply_with_swww "$img"; then
         return 0
       fi
-      msg "$(swww_family_label) failed, falling back to hyprpaper"
-      BACKEND="hyprpaper"
-      apply_with_hyprpaper "$img"
-      return $?
+      if backend_is_available hyprpaper; then
+        msg "$(swww_family_label) failed, falling back to hyprpaper"
+        BACKEND="hyprpaper"
+        apply_with_hyprpaper "$img"
+        return $?
+      fi
+      msg "$(swww_family_label) failed; no compatible still-image fallback"
+      return 1
       ;;
     hyprpaper)
       apply_with_hyprpaper "$img"
@@ -2617,7 +2700,12 @@ restore_apply_saved_map() {
         ;;
       hyprpaper)
         [[ "$ext" == "gif" || "$ext" == "mp4" ]] && { (( skipped++ )); continue; }
-        hypr_entries+=("${out}"$'\t'"${img}")
+        if is_hyprland_session; then
+          hypr_entries+=("${out}"$'\t'"${img}")
+        else
+          # Restore Hyprland-saved still images through the portable daemon.
+          swww_entries+=("${out}"$'\t'"${img}")
+        fi
         ;;
       mpvpaper)
         [[ "$ext" != "mp4" ]] && { (( skipped++ )); continue; }
@@ -2634,7 +2722,9 @@ restore_apply_saved_map() {
   done
 
   if (( ${#swww_entries[@]} > 0 )); then
-    kill_hyprpaper_if_running || true
+    if is_hyprland_session; then
+      kill_hyprpaper_if_running || true
+    fi
     ensure_swww_daemon || true
     for entry in "${swww_entries[@]}"; do
       out="${entry%%$'\t'*}"
@@ -4421,7 +4511,7 @@ main() {
   load_state
   parse_args "$@"
 
-  [[ "$BACKEND" == "swww" || "$BACKEND" == "hyprpaper" || "$BACKEND" == "mpvpaper" ]] || BACKEND="hyprpaper"
+  [[ "$BACKEND" == "swww" || "$BACKEND" == "hyprpaper" || "$BACKEND" == "mpvpaper" ]] || BACKEND="swww"
 
   if (( RESTORE_ONLY == 1 )); then
     restore_saved_wallpapers
