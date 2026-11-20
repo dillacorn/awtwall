@@ -15,7 +15,8 @@ extract_function() {
 }
 for fn in awtwall_is_umbriel_session display_choice_add \
           discover_umbriel_displays refresh_display_choices \
-          focused_output_name resolve_target_outputs; do
+          focused_output_name resolve_target_outputs \
+          restore_apply_saved_map apply_still_image; do
   definition="$(extract_function "$fn")" || fail "Cannot extract $fn"
   eval "$definition"
 done
@@ -96,4 +97,39 @@ awtwall_is_umbriel_session || fail "Umbriel socket hint not detected"
 UMBRIEL_SOCKET=""
 unset XDG_CURRENT_DESKTOP
 if awtwall_is_umbriel_session; then fail "Unset desktop misidentified as Umbriel"; fi
+# Restoring a Hyprland hyprpaper entry under Umbriel must use awww/swww
+# without rewriting the persisted choice or touching Hyprland.
+XDG_CURRENT_DESKTOP="Umbriel"
+UMBRIEL_SOCKET=""
+temp="$(mktemp -d)"
+trap 'rm -rf -- "$temp"' EXIT
+printf 'test image\n' >"$temp/wall.png"
+declare -A BACKEND_STATE_MAP=(["DP-1"]="$temp/wall.png")
+backend_state_read() { :; }
+backend_state_output_backend_for() { printf 'hyprpaper'; }
+backend_state_write() { fail 'restore rewrote the saved backend'; }
+backend_is_available() { [[ "$1" == "swww" ]]; }
+kill_hyprpaper_if_running() { :; }
+ensure_swww_daemon() { :; }
+kill_mpvpaper_for_target() { :; }
+swww_apply_output() {
+  [[ "$1" == "DP-1" && "$2" == "$temp/wall.png" ]] || return 1
+  RESTORED_WITH="swww"
+}
+hyprpaper_apply_output() { RESTORED_WITH="hyprpaper"; return 1; }
+mpvpaper_apply_output() { return 1; }
+RESTORED_WITH=""
+restore_apply_saved_map >/dev/null || fail 'Umbriel hyprpaper-state restore failed'
+[[ "$RESTORED_WITH" == "swww" ]] || fail 'Umbriel tried an incompatible restore backend'
+
+# Failed swww application must not attempt a Hyprland-only fallback.
+BACKEND="swww"
+STATUS_MSG=""
+msg() { STATUS_MSG="$*"; }
+apply_with_swww() { return 1; }
+apply_with_hyprpaper() { RESTORED_WITH="hyprpaper"; return 1; }
+RESTORED_WITH=""
+if apply_still_image "$temp/wall.png"; then fail 'Failed swww apply succeeded'; fi
+[[ "$RESTORED_WITH" != "hyprpaper" ]] || fail 'Umbriel attempted a Hyprland-only fallback'
+
 printf 'PASS: Umbriel output discovery, focus, and targeting\n'
