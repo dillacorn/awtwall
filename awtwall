@@ -319,15 +319,17 @@ post_exec_label() {
 }
 
 is_umbriel_session() {
-  case ":${XDG_CURRENT_DESKTOP,,}:" in
+  local desktop="${XDG_CURRENT_DESKTOP:-}"
+  case ":${desktop,,}:" in
     *:umbriel:*) return 0 ;;
   esac
   return 1
 }
 
 is_hyprland_session() {
+  local desktop="${XDG_CURRENT_DESKTOP:-}"
   is_umbriel_session && return 1
-  case ":${XDG_CURRENT_DESKTOP,,}:" in
+  case ":${desktop,,}:" in
     *:hyprland:*) return 0 ;;
   esac
   [[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]
