@@ -63,7 +63,7 @@ For normal wallpaper application, install at least one supported backend:
 
 Optional integrations include:
 
-- `jq` for better monitor detection
+- `jq` for compositor monitor detection (required for full Umbriel output and focused-display support)
 - `ffmpeg` for better MP4 thumbnail extraction
 - `xdg-utils` to open the wallpaper directory
 - `curl` or `wget` for release/version checks

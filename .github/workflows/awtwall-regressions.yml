@@ -1,0 +1,39 @@
+name: Awtwall Bash regression checks
+
+on:
+  push:
+    branches:
+      - feature/v2.2.1-umbriel-displays
+  pull_request:
+    paths:
+      - awtwall
+      - 'tests/**'
+      - '.github/workflows/awtwall-regressions.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  bash-regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Validate Bash syntax
+        run: |
+          for file in awtwall awtwall-installer awtwall-update tests/*.sh; do
+            bash -n "$file"
+          done
+      - name: Exercise Awtwall regression tests
+        run: |
+          bash tests/test-umbriel-displays.sh
+          bash tests/test-select-only.sh
+          bash tests/test-select-only-runtime.sh
+      - name: Verify patch whitespace
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff --check "origin/${{ github.base_ref }}...HEAD"
+          fi

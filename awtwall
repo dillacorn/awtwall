@@ -30,7 +30,7 @@ APP_NAME="awtwall"
 APP_ID="awtwall"
 
 # AWTWALL_VERSION_BLOCK_BEGIN
-AWTWALL_VERSION="${AWTWALL_VERSION:-v2.2.0}"  # bump for releases
+AWTWALL_VERSION="${AWTWALL_VERSION:-v2.2.1}"  # bump for releases
 AWTWALL_REPO="${AWTWALL_REPO:-dillacorn/awtwall}"
 AWTWALL_UPDATE_CMD="${AWTWALL_UPDATE_CMD:-}"
 
@@ -464,7 +464,7 @@ have_swww_backend() {
 backend_is_available() {
   case "$1" in
     swww) have_swww_backend ;;
-    hyprpaper) have hyprpaper && have hyprctl ;;
+    hyprpaper) ! awtwall_is_umbriel_session && have hyprpaper && have hyprctl ;;
     mpvpaper) have mpvpaper ;;
     *) return 1 ;;
   esac
@@ -1197,7 +1197,7 @@ Wallpaper backends (install at least one):
 
 Optional:
   ffmpeg    (better .mp4 thumbnail extraction)
-  jq        (better monitor detection)
+  jq        (required for Umbriel output detection; improves other compositors)
   xdg-utils (open wallpaper folder)
 REQEOF
 }
@@ -1299,7 +1299,12 @@ check_noninteractive_requirements() {
   fi
 
   if [[ "$RANDOM_ACTION" == "current" ]]; then
-    if have hyprctl; then
+    if awtwall_is_umbriel_session; then
+      if ! have umbriel || ! have jq; then
+        missing_cmds+=("umbriel + jq (needed to detect the focused Umbriel output)")
+        missing=1
+      fi
+    elif have hyprctl; then
       :
     elif have swaymsg && have jq; then
       :
@@ -1575,6 +1580,63 @@ ensure_thumb_assets() {
 }
 
 # ---------- monitor / backend ----------
+awtwall_is_umbriel_session() {
+  local desktop="${XDG_CURRENT_DESKTOP:-}"
+  case ":${desktop,,}:" in
+    *:umbriel:*) return 0 ;;
+  esac
+  [[ -n "${UMBRIEL_SOCKET:-}" ]]
+}
+
+discover_umbriel_displays() {
+  local json name width height refresh x y logical_w logical_h focused label
+  local before=${#DISPLAY_CHOICES[@]}
+  have umbriel && have jq || return 1
+
+  json="$(umbriel outputs --json 2>/dev/null || true)"
+  jq -e '(if type == "array" then . elif type == "object" then (.ok // .outputs // []) else [] end) | type == "array"' \
+    >/dev/null 2>&1 <<<"$json" || return 1
+
+  while IFS=$'\t' read -r name width height refresh x y logical_w logical_h focused; do
+    [[ -n "$name" ]] || continue
+    label="${name} - ${width}x${height}"
+    (( refresh > 0 )) && label+="@${refresh}Hz"
+    label+=" - pos ${x},${y}"
+    if [[ "$focused" == "true" ]]; then
+      label+=" - focused"
+      DISPLAY_FOCUSED="$name"
+    fi
+    display_choice_add "$name" "$label" "${x}:${y}:${logical_w}:${logical_h}"
+  done < <(
+    jq -r '
+      (if type == "array" then . else (.ok // .outputs // []) end)[]
+      | select(.enabled == true)
+      | (.position // [0, 0]) as $pos
+      | (.logical_size // [0, 0]) as $logical
+      | (if ($pos | type) == "array" then ($pos[0] // 0) else ($pos.x // 0) end) as $x
+      | (if ($pos | type) == "array" then ($pos[1] // 0) else ($pos.y // 0) end) as $y
+      | (if ($logical | type) == "array" then ($logical[0] // 0) else ($logical.width // $logical.w // 0) end) as $lw
+      | (if ($logical | type) == "array" then ($logical[1] // 0) else ($logical.height // $logical.h // 0) end) as $lh
+      | ([.modes[]? | select(.current == true)] | .[0] // {}) as $mode
+      | [
+          (.name // ""),
+          ($mode.width // $lw),
+          ($mode.height // $lh),
+          (($mode.refresh_mhz // 0) / 1000 | round),
+          $x, $y, $lw, $lh,
+          (.focused // false)
+        ]
+      | @tsv
+    ' <<<"$json" 2>/dev/null || true
+  )
+
+  if (( ${#DISPLAY_CHOICES[@]} > before )); then
+    DISPLAY_SOURCE="Umbriel"
+    return 0
+  fi
+  return 1
+}
+
 display_choice_add() {
   local name="$1" label="${2:-$1}" geometry="${3:-}" item
   [[ -n "$name" ]] || return 1
@@ -1760,10 +1822,14 @@ refresh_display_choices() {
     return 0
   fi
 
-  discover_hyprland_displays ||
-    discover_sway_displays ||
-    discover_niri_displays ||
-    discover_backend_displays || true
+  if awtwall_is_umbriel_session; then
+    discover_umbriel_displays || discover_backend_displays || true
+  else
+    discover_hyprland_displays ||
+      discover_sway_displays ||
+      discover_niri_displays ||
+      discover_backend_displays || true
+  fi
 
   for item in "${DISPLAY_CHOICES[@]}"; do
     if [[ "$item" == "$cur" ]]; then
@@ -1780,6 +1846,22 @@ refresh_display_choices() {
 
 focused_output_name() {
   local out=""
+
+  # Live Umbriel focus takes precedence over the previous menu snapshot.
+  if awtwall_is_umbriel_session; then
+    if have umbriel && have jq; then
+      out="$(umbriel outputs --json 2>/dev/null |
+        jq -r '(if type == "array" then . else (.ok // .outputs // []) end)[]
+          | select(.enabled == true and .focused == true)
+          | .name // empty' 2>/dev/null | head -n1 || true)"
+      if [[ -n "$out" && "$out" != "null" ]]; then
+        printf '%s\n' "$out"
+        return 0
+      fi
+    fi
+    return 1
+  fi
+
 
   if [[ -n "${DISPLAY_FOCUSED:-}" ]]; then
     printf '%s\n' "$DISPLAY_FOCUSED"
@@ -2171,10 +2253,14 @@ apply_still_image() {
       if apply_with_swww "$img"; then
         return 0
       fi
-      msg "$(swww_family_label) failed, falling back to hyprpaper"
-      BACKEND="hyprpaper"
-      apply_with_hyprpaper "$img"
-      return $?
+      if backend_is_available hyprpaper; then
+        msg "$(swww_family_label) failed, falling back to hyprpaper"
+        BACKEND="hyprpaper"
+        apply_with_hyprpaper "$img"
+        return $?
+      fi
+      msg "$(swww_family_label) apply failed (no compatible fallback)"
+      return 1
       ;;
     hyprpaper)
       apply_with_hyprpaper "$img"
@@ -2617,7 +2703,17 @@ restore_apply_saved_map() {
         ;;
       hyprpaper)
         [[ "$ext" == "gif" || "$ext" == "mp4" ]] && { (( skipped++ )); continue; }
-        hypr_entries+=("${out}"$'\t'"${img}")
+        if awtwall_is_umbriel_session; then
+          # Preserve the saved Hyprland backend while displaying this image
+          # through a compatible Umbriel backend for this restore only.
+          if backend_is_available swww; then
+            swww_entries+=("${out}"$'\t'"${img}")
+          else
+            (( skipped++ ))
+          fi
+        else
+          hypr_entries+=("${out}"$'\t'"${img}")
+        fi
         ;;
       mpvpaper)
         [[ "$ext" != "mp4" ]] && { (( skipped++ )); continue; }
@@ -2690,6 +2786,10 @@ restore_last_applied_fallback() {
 
   ext="${img##*.}"
   ext="${ext,,}"
+
+  if awtwall_is_umbriel_session && [[ "$BACKEND" == "hyprpaper" ]]; then
+    BACKEND="$(default_still_backend)"
+  fi
 
   if [[ "$ext" == "mp4" ]]; then
     BACKEND="mpvpaper"
