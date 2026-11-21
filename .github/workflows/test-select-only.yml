@@ -30,3 +30,91 @@ jobs:
         run: |
           bash tests/test-select-only.sh
           bash tests/test-select-only-runtime.sh
+
+  publish-awtwall-v2-2-1:
+    # Temporary one-use workflow on an unmerged helper PR only.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.repository == 'dillacorn/awtwall' &&
+      github.event.pull_request.head.repo.full_name == 'dillacorn/awtwall' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'release/awtwall-2.2.1-one-shot' &&
+      github.event.pull_request.title == 'One-shot: publish awtwall 2.2.1' &&
+      github.event.pull_request.draft == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish v2.2.1 at the verified main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_MAIN_SHA: 0f56aafc21fc29a9aa2dfce4869e3f3174e07c95
+          RELEASE_TAG: "2.2.1"
+        run: |
+          set -euo pipefail
+
+          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [[ "$current_sha" != "$EXPECTED_MAIN_SHA" ]]; then
+            printf 'ERROR: main advanced. Expected %s but got %s.\n' "$EXPECTED_MAIN_SHA" "$current_sha" >&2
+            false
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            printf 'ERROR: Release %s already exists.\n' "$RELEASE_TAG" >&2
+            false
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            printf 'ERROR: Tag %s already exists.\n' "$RELEASE_TAG" >&2
+            false
+          fi
+
+          notes="$RUNNER_TEMP/awtwall-2.2.1-release-notes.md"
+          printf '%s\n' \
+            '## Changes' \
+            '' \
+            '- Added native Umbriel display discovery, including enabled outputs, focused-monitor identification, current resolution and refresh rate, and logical display layout.' \
+            '- Enabled focused-display and per-monitor wallpaper selection under Umbriel while preserving Hyprland, Sway, and niri behavior.' \
+            '- Umbriel wallpaper restoration now ignores saved output names absent from the active session without removing shared wallpaper state for other compositors.' \
+            '- Added regression tests for Umbriel output detection and cross-compositor restore preservation.' \
+            '' \
+            '## Validation' \
+            '' \
+            '- Bash syntax and four regression tests passed on the maintainer machine.' \
+            '- Umbriel identified DP-1 and DP-3 and restored two saved wallpapers. The inactive WAYLAND-1 entry was correctly ignored.' \
+            '- The selection-only GitHub Actions workflow passed for PR #7.' \
+            '' \
+            '## Install and update' \
+            '' \
+            '- [Install](https://github.com/dillacorn/awtwall/blob/2.2.1/INSTALL.md)' \
+            '- [Update](https://github.com/dillacorn/awtwall/blob/2.2.1/UPDATE.md)' \
+            '- [Uninstall](https://github.com/dillacorn/awtwall/blob/2.2.1/UNINSTALL.md)' \
+            '' \
+            'AUR package publication is separate and is not part of this GitHub release.' \
+            > "$notes"
+
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$EXPECTED_MAIN_SHA" \
+            --title "v2.2.1" \
+            --notes-file "$notes" \
+            --latest
+
+          actual_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')"
+          if [[ "$actual_sha" != "$EXPECTED_MAIN_SHA" ]]; then
+            printf 'ERROR: Published tag points at %s, expected %s.\n' "$actual_sha" "$EXPECTED_MAIN_SHA" >&2
+            false
+          fi
+
+          actual_name="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json name --jq '.name')"
+          actual_body="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body')"
+          actual_status="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '[.isDraft, .isPrerelease] | @json')"
+          if [[ "$actual_name" != "v2.2.1" ||
+                "$actual_body" != "$(cat "$notes")" ||
+                "$actual_status" != '[false,false]' ]]; then
+            printf 'ERROR: Release metadata did not match intended publication.\n' >&2
+            false
+          fi
+
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json name,tagName,targetCommitish,isDraft,isPrerelease,url \
+            --jq '.'
